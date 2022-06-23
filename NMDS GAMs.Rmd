@@ -1,0 +1,832 @@
+---
+title: "Using GAMs to Analyze Plankton Comunity NMDS Data"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "5/17/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook takes the OUTPUT of the NMDS analyses and looks at how well each 
+synthetic NMDS axis can be predicted based on models akin to what we used to
+analyze total zooplankton abundance, diversity and individual species. 
+
+The flow of analyses is as follows:
+
+1. Conduct the NMDS analysis (mimicking Erin's original NMDS plot)
+
+2. Plot the results color coded to show major relationships with predictors
+
+3. Conduct a linear analysis of relationship to each predictors using the
+`envfit()` function included in the `vegan` package.
+
+4. Conduct GAM analyses of the synthetic axis scores from the NMDS.
+
+# Load Libraries
+```{r libraries}
+library(tidyverse)
+library(vegan)
+library(readxl)
+library(mgcv)      # for GAM models
+library(emmeans)   # For extracting useful "marginal" model summaries
+```
+
+# Set Graphics Theme
+This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
+format suitable for (some) publications.
+```{r set_theme}
+theme_set(theme_classic())
+```
+
+# Folder References
+I use folder references to allow limited indirection, thus making code from 
+GitHub repositories more likely to run "out of the box".
+```{r folder_refs}
+data_folder <- "Original_Data"
+
+
+dir.create(file.path(getwd(), 'figures'), showWarnings = FALSE)
+```
+
+# Input Data
+##  Environmental Data
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+
+station_data_2 <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "skip", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date)) %>%
+  filter(! (station == 8 & month == 'May' & year == 2015))
+```
+
+Station names are arbitrary, and Ambrose expressed interest in renaming them
+from Stations 2, 4, 5 and 8 to Stations 1,2,3,and 4.
+
+The `factor()` function by default sorts levels before assigning numeric codes,
+so a convenient way to replace the existing station codes with sequential
+numbers is to create a factor and extract the numeric indicator values with 
+`as.numeric()`.
+
+```{r}
+station_data <- station_data_2 %>%
+  mutate(station = factor(as.numeric(factor(station)))) %>%
+  mutate(season = case_when(month == 'May' ~ 'Spring',
+                             month == 'July' ~ 'Summer',
+                             TRUE ~ 'Fall')) %>%
+  relocate(season, .after = month) %>%
+  relocate(station, .after = season)
+```
+
+Here  I mostly select the depth-averaged water chemistry parameters, create
+short names that will work in later analyses and graphics and convert some
+variables to factors to control later analyses.
+
+```{r build_env_data_2}
+station_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         RH = Herring,
+         Fish = `___60`
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, DOY, riv_km, Temp, Sal, Turb, AvgTurb, 
+         DOsat, Chl, RH, Fish) %>%
+  arrange(Date, Station)
+head(station_data)
+```
+
+## Composition Data
+```{r load_composition_data}
+filename.in <- "Penobscot_Zooplankton and field data_EA_2.13.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+zoopl <- read_excel(file_path,
+                    sheet = "NMDS Happy",
+                    col_types = c("date", 
+                                  "text", "numeric", "numeric", "text", 
+                                  "text", "text", "text", "text", "text", 
+                                  "text", "numeric", "text", "text", 
+                                  "numeric", "numeric", "numeric", 
+                                  "text", "text", "text", "numeric", 
+                                  "numeric", "numeric", "numeric")) %>%
+  select(-c(`...20`:`...24`)) %>%
+  rename_with(~ gsub(" ", "_", .x))
+```
+
+We renumber the stations here as well. The code is similar.
+```{r change_station_names_2}
+zoopl <- zoopl %>%
+  mutate(STATION = factor(as.numeric(factor(STATION))))
+zoopl
+```
+
+## Turn Data from Long to Wide
+This code generates a total abundance for each taxa by site and date and pivots 
+it to wide format. The code is more compact that what Erin used, but slightly 
+more opaque because it relies on several options of the `pivot_wider()` 
+function.
+
+```{r aggregate_zoopl_data}
+zoopl2 <- zoopl %>%
+  pivot_wider(c(DATE, Month, Year, STATION), 
+              names_from = NAME, 
+              names_sort = TRUE,
+              values_from = CORRECTED_PERCENT_ABUNDANCE, 
+  values_fn = sum,
+  values_fill = 0)
+zoopl2
+```
+
+## Check for Dropped Sample
+Erin Ambrose dropped 5/20/15 Station 8 from both datasheets. 
+Environmental and zooplankton data should each have 59 rows, and they do.
+
+Erin notes that there was no zooplankton "sample" (?) only nekton for that
+sample.  I'm not sure if that means no sample was collected or there were no 
+zooplankton in the sample.  Anyway, she noted that this sample "threw 
+off calculation of percent abundances." 
+
+Note that that sample is one of the Spring "washout" samples that
+cause trouble on our other analyses as well.
+
+```{r}
+sum(! is.na((zoopl2 %>%
+  filter((STATION == 4 & Month == 'May' & Year == 2015))))) == 0
+sum(! is.na(station_data %>%
+  filter((Station == 4 & Month == 'May' & Year == 2015)))) == 0
+```
+
+## Correct Sample Row Alignment
+I had some funny artifacts popping up in my initial (re) analyses.  I finally
+tracked down to the fact that my data was in a different order from how Erin's
+version, apparently because I used different tools that have different default
+ordering.  Since NMDS is determined only by a "distance" metric, the NMDS
+solution is unique only to rotations and reflections.  In fact, after the NMDS 
+is fit, the default behavior is to rotate the solution to align the first axis
+with the largest apparent axis of variation, so the solution returned is unique
+onlt to reflections. It looks like ordering of samples can affect which solution 
+the algorithm presents.  Only by ensuring uniform ordering can we ensure that 
+output is similar to Erin'd prior analysis.
+
+## Align Data Tables
+```{r}
+zoopl2 <- zoopl2 %>%
+  arrange(DATE, STATION)
+station_data<- station_data %>%
+  arrange(Date, Station)
+
+head(zoopl2[,c(1,4)])
+head(station_data[,c(1,2)])
+```
+
+## Matrix of Species for `vegan`
+The `vegan` package likes to work with a matrix of species occurrences. Although 
+the matrix can have row names that provide sample identifiers, that was not
+done here. The "matrix" I produce here is really a data frame with
+nothing but numeric values. While those are  different data structures
+internally, `vegan` handles the conversion in the background.
+
+```{r make_cdata}
+CDATA <- zoopl2[,-c(1:4)]
+```
+
+## Data Sanity Checks 
+We should have no NAs, and row sums should all be 1 (100%), at least within 
+reasonable rounding error. 
+```{r sanity_check}
+anyNA(CDATA)
+plot(rowSums(CDATA))
+```
+
+
+ONe sample is slightly off the calculation of totals, but the deviation is tiny,
+so not of any interest.
+
+# NMDS Analyses 
+```{r nmds}
+NMDSE <- metaMDS(CDATA, autotransform = FALSE, k = 2, trymax = 75)
+NMDSE
+```
+
+## Plot
+```{r plot_nmds}
+plot(NMDSE, type = 'p')
+```
+
+## Plot Species
+```{r plot_nmds_spp, fig.width = 7, fig.height = 5}
+plot(NMDSE, 'species', type = 't')
+```
+
+# Combining the NMDS Results with Environmental Data
+I want to use the names of these variables as labels in graphics later.
+I capitalize variable names here, so they will appear capitalized in graphics 
+without further action on my part.
+
+```{r build_env_data_1}
+envNMDS <- station_data %>%
+  select(-Date, -Month, -DOY, -riv_km, -AvgTurb) %>%
+  mutate(Turb2 = log(Turb),
+         Chl2 = log(Chl),
+         RH2 = log1p(RH),
+         Fish2 = log1p(Fish)) %>%
+  mutate(sample_seq = as.numeric(Season) + (Year-2013)*3,
+         sample_event = factor(sample_seq)) %>%
+  cbind(as_tibble(NMDSE$points))
+```
+
+# Graphic Exploration
+These plots are intended principally to help us understand the NMDS from a more 
+intuitive perspective.  The idea is to plot the ordination, but colored by various
+predictor variables.
+
+## By Station
+```{r nmds_by_station, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+    geom_point(aes(color=Station)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+Note that station 1 is split into a group along the upper edge and two points 
+along the lower edge. The stations don't segregate fully, but there are trends.
+Other than those two spring samples, Station 1 is upper edge. Station 2 is
+upper zone as well. I suspect those two samples are "washout" event samples.
+
+## By Year
+```{r, nmds_by_year, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=Yearf)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+MAYBE 2016 is towards the upper edge, but it's not clear at all.  I don't see a
+robust pattern here.
+
+## By Season
+```{r, nmds_by_season, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=Season)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+Note the VERY strong association here, with Spring samples all to the left on 
+the plot.  Summer and Fall plots are fairly mixed up, but all to the left. That 
+means Axis 1 can be interpreted as largely a "season" signal. 
+
+## By Temperature
+```{r, nmds_by_temp, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=Temp)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+This reveals the same pattern as the last graphic, only filtered through the
+correlation between season and temperature.  Cool temperatures in spring to the 
+left.
+
+## By Salinity
+```{r, nmds_by_salinity, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=Sal)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+This one is hard to interpret. What jumps out at me here is the two VERY low 
+salinity sites at the bottom, and the tendency for other lower salinity samples
+to fall to the left (spring) and along the upper edge ( Station 1).
+
+## By Turbidity
+```{r, nmds_by_turb, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=log(Turb))) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+## By Chlorophyll
+```{r, nmds_by_chl, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=log(Chl))) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+## By Oxygen Saturation
+```{r, nmds_by_dosat, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=DOsat)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+Note that highest DO is to the left, providing an alternate "explanation" to
+considering axis 1 a seasonal axis.
+
+
+## By Herring
+```{r, nmds_by_herring, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=RH2)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+## By Fish
+```{r, nmds_by_fish, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS, aes(MDS1, MDS2)) +
+  geom_point(aes(color=Fish2)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+
+# Using `envfit` to Estimate Correlations
+The `envfit()` function is fitting linear predictors to the two NMDS axes 
+jointly. The related help file says "The environmental variables are the 
+dependent variables that are explained by the ordination scores, and each 
+dependent variable is analyzed separately." The model is always linear, which 
+is different from our GAM models.
+
+That means the `envfit() output is NOT a single multivariate statistical test, 
+but a separate statistical fit for each predictor variable.  
+
+Coefficients are the coordinates of a unit-length vector that points along the
+"direction" in ordination space that shows maximum correlation with the NMDS
+scores. (Since these are unit vectors, if one coordinate goes up, the other 
+necessarily goes down.) The R2 term "is a "goodness of fit statistic" like the
+one from multiple regression models.  The higher the number, the better the
+ability of the ordination scores to predict environmental variables
+
+These results are apparenty based on randomization methods, so results change
+somewhat between repeated model runs. The relatively high number of permutations
+specified here helps keep those effects small.
+
+## `envfit()` Single Variable Relationships
+```{r env_fit}
+ef <- envfit(NMDSE, envNMDS[,c(1, 3:15)], permu = 9999, na.rm = TRUE)
+ef
+```
+
+### Missing Values
+Note 13 observations deleted due to missingness. Those are the 2013 data, which
+lacks DO saturation data. We can refit to include those data by dropping DO as a
+predictor.  That might alter some fits.
+
+## `envfit()` Not Including Oxygen
+```{r env_fit_2}
+ef_2 <- envfit(NMDSE, envNMDS[,c(1, 3:7, 9:15)], permu = 9999, na.rm = TRUE)
+ef_2
+```
+
+Note that River Herring and log(River Herring + 1) are significantly correlated
+with the MSDS, while total fish is at best marginally significantly correlated.
+
+## Extracting Vector Information 
+The `ef` oe `ef_2` object is an `envfit` S3 object, with three named slots. The
+vector information we need to plot the environment arrows is available in
+`vectors`. But that object is itself also an S3 object, with five named items.
+The help page for `envfit()` tells us that the information on the direction of
+the arrows is in the `arrows` component. We are told that arrows contain "Arrow
+endpoints from vectorfit. The arrows are scaled to unit length."
+
+```{r what_is_arrows}
+ef_2$vectors$arrows
+```
+
+The information we need to determine the magnitude of those vectors is in the
+`r` component of the `vectors` component, which (according to the `envfit()`
+help file) contains "Goodness of fit statistic: Squared correlation 
+coefficient".
+
+The correlation coefficient is (formally) a bivariate statistic, but here it is
+being used to indicate the strength of association between two predictors (NMDS
+Axis 1 and NMDS axis 2) and each environmental variable.  I have not been able
+to find clear documentation of what is going on, but it appears the R squared
+value is (or is analogous to) the R squared value reported the implied (two
+predictor, one response) linear regression.  If that is the case, the value of 
+r can be (roughly) interpreted as the correlation coefficient between the best 
+linear combination of NMDS Axis 1 and Axis 2 and each environmental variable.
+
+It's worth pointing out that the r values are mostly pretty low. The NMDS
+ordination does not do a very good job of "predicting" environmental variables,
+except for Temperature, which it does quite well. Here are the implied
+correlation coefficients:
+
+```{r}
+sqrt(ef_2$vectors$r)
+```
+
+For plotting, we scale the length of each of the arrows by the associated 
+correlation coefficient (square root of the r squared value). The higher the 
+correlation coefficient, the longer the arrow. Thus arrow direction shows
+the mix of Axis 1 and Axis 2 that correlates best with each environmental 
+variable, while the length of the arrow shows the relative ability of the 
+ordination to predict environmental variables.
+
+```{r scaled_arrows}
+arrows <- ef_2$vectors$arrows
+rsq    <- ef_2$vectors$r
+scaled_arrows <- as_tibble(arrows*sqrt(rsq)) %>%  
+  mutate(parameter = rownames(arrows))
+```
+
+```{r anotation_positions_1}
+scale_factor = .15  # Scale position of text annotations this far off
+                    # end or arrow
+
+scaled_arrows <- scaled_arrows %>%
+  mutate(ann_xpos = NMDS1 + arrows[,1] * scale_factor,
+         ann_ypos = NMDS2 + arrows[,2] * scale_factor)
+```
+
+While we are creating vectors, we also want to create points for placing the 
+annotations identifying each vector. We want to space the labels so they are a
+fixed distance beyond the end of each vector. We do that with a little vector 
+addition.
+
+## Draft Graphic
+```{r draft_arrow_plot_1}
+plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
+  geom_point(aes(color = Season), size = 2.5) +
+  geom_segment(data=scaled_arrows,  
+               mapping = aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
+               arrow = arrow(length = unit(0.25, "cm")) ,colour="grey40") + 
+  geom_text(data=scaled_arrows, 
+            mapping = aes(x= ann_xpos,
+                          y= ann_ypos,label=parameter),
+            size=4, nudge_x =0, nudge_y = 0, hjust = .5)+
+  scale_color_viridis_d(option = 'C', name = 'Season') +
+  coord_fixed()
+plt
+```
+
+That's too messy.  We want to plot a smaller number of arrows. I recommend 
+showing only the transformed variables, since that is what we use in the GAMs. 
+
+## Possible Publication Graphics
+The instructions to authors suggests figure widths should line up with columns,
+and proposes figure widths should be: 39, 84, 129, or 174 mm wide, with height 
+not to exceed 235 mm. Presumably that corresponds to 1,2,3,or 4 columns wide? 
+
+39 mm is about one and one half inches, which his quite small, so we will use
+the 84 mm wide option, which is about 3.3 inches.
+
+### All (Transformed) Environmental Variables
+```{r draft_arrow_plot_2, fig.width = 3.3, fig.height = 3.3}
+tmp_arrows <- scaled_arrows %>%
+  filter(parameter %in% c('Temp', 'Sal', 'Turb2', 'Chl2', 
+                          'Fish2', 'RH2')) %>%
+  mutate(parameter = factor(parameter,
+                            levels = c('Temp', 'Sal', 'Turb2', 'Chl2', 
+                                       'Fish2', 'RH2'),
+                            labels = c('Temp', 'Sal', 'Turb', 'Chl', 
+                          'Fish', 'RH')))
+
+plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
+  geom_point(aes(color = Season, shape = Station), size = 1.5) +
+  geom_segment(data=tmp_arrows,  
+               mapping = aes(x=0,xend=ann_xpos,y=0,yend=ann_ypos),
+               arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
+  geom_text(data=tmp_arrows, 
+            mapping = aes(x=1.2 * ann_xpos,
+                          y=1.2 * ann_ypos,label=parameter),
+            size=3, nudge_x =0, nudge_y = 0, hjust = .5)+
+  
+  scale_color_viridis_d(option = 'C', name = '') +
+  scale_shape(name = 'Station') +
+  
+  coord_fixed(xlim =c(-1.25, 1.25)) +
+  
+  guides(color = guide_legend(title.position = "bottom", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 1),
+         shape = guide_legend(title.position = "bottom", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 2))
+
+```
+
+
+```{r fig.width = 3.3, fig.height = 4.4}
+plt + 
+  theme_classic(base_size = 10) + 
+  theme(
+        legend.position = 'bottom',
+        legend.box = 'Vertical',
+        legend.spacing.y = unit(0, 'cm'),
+        legend.margin = margin(0,0,0,0)
+        )
+```
+
+
+```{r}
+ggsave('figures/nmds_env.png', type='cairo',
+         width = 3.3, height = 3.4)
+ggsave('figures/nmds_env.pdf', device = cairo_pdf, 
+       width = 3.3, height = 3.4)
+```
+
+
+That is still too busy.
+
+1. It is perhaps problematic to show both Fish and River Herring.
+
+2. We show several arrows that are not statistically robust. We can simplify by 
+   showing only statistically significant correlations with environmental
+   variables.
+
+### Statistically Significant Environmental Variable
+```{r}
+tmp <- tmp_arrows %>%
+  filter(parameter %in% c('Temp', 'Chl', 'RH'))
+
+plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
+  geom_point(aes(color = Season, shape = Station), size = 1.5) +
+  geom_segment(data=tmp,  
+               mapping = aes(x=0,xend=ann_xpos,y=0,yend=ann_ypos),
+               arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
+  geom_text(data=tmp, 
+            mapping = aes(x=1.2 * ann_xpos,
+                          y=1.2 * ann_ypos,label=parameter),
+            size=3, nudge_x =0, nudge_y = 0, hjust = .5)+
+  scale_color_viridis_d(option = 'C', name = '') +
+  scale_shape(name = 'Station') +
+  
+  coord_fixed(xlim =c(-1.25, 1.25)) +
+  
+  guides(color = guide_legend(title.position = "top", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 1),
+         shape = guide_legend(title.position = "left", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 2))
+rm(tmp)
+```
+
+We can't change the figure width, but we can alter the figure height.  With 
+that in mind, let's reorient the legends and juggle dimensions
+
+```{r arrow_plot_1,, fig.width = 3.3, fig.height = 3.4}
+plt + 
+  theme_classic(base_size = 10) + 
+  theme(
+        legend.position = 'bottom',
+        legend.box = 'Vertical',
+        legend.spacing.y = unit(0, 'cm'),
+        legend.box.just = 'top',
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(0,0,0,0)
+        )
+```
+
+```{r}
+ggsave('figures/nmds_env_significant.png', type='cairo',
+         width = 3.3, height = 3.4)
+ggsave('figures/nmds_env_significant.pdf', device = cairo_pdf, 
+       width = 3.3, height = 3.4)
+```
+
+
+### Drop River Herring
+If we don't EVER want to drag river herring in as a predictor in the manuscript,
+we should not show it in the NMDS Plots either.
+
+```{r}
+tmp <- tmp_arrows %>%
+  filter(parameter %in% c('Temp', 'Chl'))
+
+plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
+  geom_point(aes(color = Season, shape = Station), size = 1.5) +
+  geom_segment(data=tmp,  
+               mapping = aes(x=0,xend=ann_xpos,y=0,yend=ann_ypos),
+               arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
+  geom_text(data=tmp, 
+            mapping = aes(x=1.2 * ann_xpos,
+                          y=1.2 * ann_ypos,label=parameter),
+            size=3, nudge_x =0, nudge_y = 0, hjust = .5)+
+  scale_color_viridis_d(option = 'C', name = '') +
+  scale_shape(name = 'Station') +
+  
+  coord_fixed(xlim =c(-1.25, 1.25)) +
+  
+  guides(color = guide_legend(title.position = "top", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 1),
+         shape = guide_legend(title.position = "left", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 2))
+rm(tmp)
+```
+
+
+```{r arrow_plot_2, fig.width = 3.3, fig.height = 3.3}
+plt + 
+  theme_classic(base_size = 10) + 
+  theme(
+        legend.position = 'bottom',
+        legend.box = 'Vertical',
+        legend.spacing.y = unit(0, 'cm'),
+        legend.box.just = 'top',
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(0,0,0,0)
+        )
+```
+
+```{r}
+ggsave('figures/nmds_env_significant_no_RH.png', type='cairo',
+         width = 3.3, height = 3.4)
+ggsave('figures/nmds_env_significant_no_RH', device = cairo_pdf, 
+       width = 3.3, height = 3.4)
+```
+
+
+## Qualitative Conclusions
+
+*  Axis 1 is highly correlated with season, and thus highly correlated with 
+   temperature and oxygen saturation (which was dropped from this analysis
+   because of missing 2013 data).
+   
+*  Axis 2 is closely related to Station, with upstream stations to the 
+   upper right and downstream stations to the lower left.  Two "oddball" 
+   Station 1 samples are extreme low salinity spring samples -- the same samples
+   that cause problems fitting many of our models.  The second axis is not 
+   especially correlated with ANY of the environmental variables.
+
+*  I am uncertain how to interpret the Chlorophyll association.
+
+# GAM Analysis
+## Axis 1
+Note I increase the iterations to fit the model.  This probably means the 
+gradient near the solution is low, so parameter estimates may not bee very good.
+```{r}
+gam_1 <- gamm(MDS1 ~ 
+               Station + 
+               Season +
+               s(Temp, bs="ts") +
+               s(Sal, bs="ts") + 
+               s(log(Turb), bs="ts") + 
+               s(log(Chl), bs="ts") + 
+               s(log1p(Fish),bs="ts"),
+              random = list(Yearf = ~ 1, sample_event = ~ 1),
+             data = envNMDS, family = 'gaussian',
+             control = list(msMaxIter = 1000, msMaxEval = 1000, niterEM=0))
+summary(gam_1$gam)
+
+```
+
+```{r}
+anova(gam_1$gam)
+```
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(gam_1$gam)
+par(oldpar)
+```
+
+```{r}
+(emms <- emmeans(gam_1, pairwise ~ Season, type = 'response',
+                 data = envNMDS))
+```
+
+As we saw from the `envfit()` analysis, Axis 1 is associated with the SEASON,
+with spring clearly separated from Summer and Fall. Temperature is also 
+important in the GAM analysis (note that the relationship is essentially 
+linear). While Turbidity is not shrunk out of the model entirely, the
+relationship does not reach statistical significance.
+Essentially, low Axis 1 Scores are spring, with lower temperatures.
+
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(gam_1$gam)
+par(oldpar)
+```
+
+The model is fairly well behaved. No obvious problems here.
+
+## Axis 2
+This one converges readily, but only if I include the Seaso:Station interaction 
+term..
+```{r}
+gam_2 <- gamm(MDS2 ~ 
+               Station * 
+               Season +
+               s(Temp, bs="ts") +
+               s(Sal, bs="ts") + 
+               s(log(Turb), bs="ts") + 
+               s(log(Chl), bs="ts") + 
+               s(log1p(Fish),bs="ts"),
+              random = list(Yearf = ~ 1, sample_event = ~ 1),
+             data = envNMDS, family = 'gaussian')
+summary(gam_2$gam)
+
+```
+
+```{r}
+anova(gam_2$gam)
+```
+
+
+emmip()
+```{r}
+emmip(gam_2 , Season ~Station,  data = envNMDS)
+```
+
+```{r}
+(emms <- emmeans(gam_2, pairwise ~ Station:Season,  data = envNMDS))
+```
+
+Station 1 Spring is not meaningfully different from Station 2 Spring, but it 
+differs from all the other values.
+
+Station 2 spring differs from Stations 3 and 4 Spring, but not other values.
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(gam_2$gam)
+par(oldpar)
+```
+
+Axis 2 shows the effect of a couple of low salinity samples.  Those Samples
+plot in NMDS space in the lower left, far from most Station 1 samples, so the 
+GAM smoother fits a strong change in axis 2 scores to better predict those 
+low salinity, early spring "washout" samples.
+
+The other big story here is the connection between Axis 2 and early spring, 
+upstream stations.  Those samples have the highest values on Axis 2, 
+meaningfully different from most other values.
+
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(gam_2$gam)
+par(oldpar)
+```
+
+Again, it looks like the low salinity samples have a disproportionate effect
+on model fit, but the models are otherwise well behaved....
+
+
+Axis 2 is associated with the differences between Stations 1 and 2 (high values)
+and Stations 3 and 4.
