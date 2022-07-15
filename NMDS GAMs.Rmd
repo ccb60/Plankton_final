@@ -21,20 +21,22 @@ knitr::opts_chunk$set(fig.align = 'center',
 ```
 
 # Introduction
-This notebook takes the OUTPUT of the NMDS analyses and looks at how well each 
-synthetic NMDS axis can be predicted based on models akin to what we used to
-analyze total zooplankton abundance, diversity and individual species. 
+This notebook takes the output of an NMDS analyses of plankton community 
+composition and the relationship of the community composition to major 
+environmental variables. 
 
 The flow of analyses is as follows:
 
-1. Conduct the NMDS analysis (mimicking Erin's original NMDS plot)
+1. Conduct the NMDS analysis (mimicking Ambrose's original NMDS plot)
 
-2. Plot the results color coded to show major relationships with predictors
+2. Plot the results, color coded by different environmental variables to
+   examine major relationships with predictors on a graphic basis.
 
-3. Conduct a linear analysis of relationship to each predictors using the
-`envfit()` function included in the `vegan` package.
-
-4. Conduct GAM analyses of the synthetic axis scores from the NMDS.
+3. Conduct a linear analysis of the relationship between GAM output and
+   each predictor, using the `envfit()` function from `vegan`.
+   
+4. Conduct GAM analyses of the synthetic NMDS axis scores, based on GAM models
+   that follow the same model form as we used to analyze zooplankton abundance.
 
 # Load Libraries
 ```{r libraries}
@@ -199,15 +201,15 @@ sum(! is.na(station_data %>%
 
 ## Correct Sample Row Alignment
 I had some funny artifacts popping up in my initial (re) analyses.  I finally
-tracked down to the fact that my data was in a different order from how Erin's
+tracked down the cause.  My data was in a different order from Ambrose's
 version, apparently because I used different tools that have different default
 ordering.  Since NMDS is determined only by a "distance" metric, the NMDS
-solution is unique only to rotations and reflections.  In fact, after the NMDS 
+solution is unique only to rotations and reflections.  In fact, after the NMDS
 is fit, the default behavior is to rotate the solution to align the first axis
 with the largest apparent axis of variation, so the solution returned is unique
-onlt to reflections. It looks like ordering of samples can affect which solution 
-the algorithm presents.  Only by ensuring uniform ordering can we ensure that 
-output is similar to Erin'd prior analysis.
+only to reflections. It looks like ordering of samples can affect which solution
+the algorithm presents.  Only by ensuring uniform ordering can we ensure that
+output is similar to Ambrose's prior analysis.
 
 ## Align Data Tables
 ```{r}
@@ -232,7 +234,7 @@ CDATA <- zoopl2[,-c(1:4)]
 ```
 
 ## Data Sanity Checks 
-We should have no NAs, and row sums should all be 1 (100%), at least within 
+We should have no `NA`s, and row sums should all be 1 (100%), at least within 
 reasonable rounding error. 
 ```{r sanity_check}
 anyNA(CDATA)
@@ -240,7 +242,7 @@ plot(rowSums(CDATA))
 ```
 
 
-ONe sample is slightly off the calculation of totals, but the deviation is tiny,
+One sample is slightly off the calculation of totals, but the deviation is tiny,
 so not of any interest.
 
 # NMDS Analyses 
@@ -259,7 +261,7 @@ plot(NMDSE, type = 'p')
 plot(NMDSE, 'species', type = 't')
 ```
 
-# Combining the NMDS Results with Environmental Data
+## Combining the NMDS Results with Environmental Data
 I want to use the names of these variables as labels in graphics later.
 I capitalize variable names here, so they will appear capitalized in graphics 
 without further action on my part.
@@ -403,7 +405,7 @@ dependent variables that are explained by the ordination scores, and each
 dependent variable is analyzed separately." The model is always linear, which 
 is different from our GAM models.
 
-That means the `envfit() output is NOT a single multivariate statistical test, 
+That means the `envfit()` output is NOT a single multivariate statistical test, 
 but a separate statistical fit for each predictor variable.  
 
 Coefficients are the coordinates of a unit-length vector that points along the
@@ -413,9 +415,8 @@ necessarily goes down.) The R2 term "is a "goodness of fit statistic" like the
 one from multiple regression models.  The higher the number, the better the
 ability of the ordination scores to predict environmental variables
 
-These results are apparenty based on randomization methods, so results change
-somewhat between repeated model runs. The relatively high number of permutations
-specified here helps keep those effects small.
+These results are apparently based on randomization methods, so results change
+somewhat between repeated runs of the following code. The relatively high number of permutations specified here helps keep those effects small.
 
 ## `envfit()` Single Variable Relationships
 ```{r env_fit}
@@ -438,12 +439,12 @@ Note that River Herring and log(River Herring + 1) are significantly correlated
 with the MSDS, while total fish is at best marginally significantly correlated.
 
 ## Extracting Vector Information 
-The `ef` oe `ef_2` object is an `envfit` S3 object, with three named slots. The
+The `ef` or `ef_2` object is an `envfit` S3 object, with three named slots. The
 vector information we need to plot the environment arrows is available in
 `vectors`. But that object is itself also an S3 object, with five named items.
 The help page for `envfit()` tells us that the information on the direction of
 the arrows is in the `arrows` component. We are told that arrows contain "Arrow
-endpoints from vectorfit. The arrows are scaled to unit length."
+endpoints from `vectorfit`. The arrows are scaled to unit length."
 
 ```{r what_is_arrows}
 ef_2$vectors$arrows
@@ -767,7 +768,7 @@ par(oldpar)
 The model is fairly well behaved. No obvious problems here.
 
 ## Axis 2
-This one converges readily, but only if I include the Seaso:Station interaction 
+This one converges readily, but only if I include the Season:Station interaction 
 term..
 ```{r}
 gam_2 <- gamm(MDS2 ~ 
@@ -788,8 +789,6 @@ summary(gam_2$gam)
 anova(gam_2$gam)
 ```
 
-
-emmip()
 ```{r}
 emmip(gam_2 , Season ~Station,  data = envNMDS)
 ```
