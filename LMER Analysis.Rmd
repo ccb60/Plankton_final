@@ -198,32 +198,6 @@ complete_data <- base_data %>%
   filter(complete.cases(.))
 ```
 
-# Check Distributuion of the "Fish" Abundance
-```{r fig.width = 3, fig.height = 2}
-base_data %>%
-  ggplot(aes(x = Fish)) +
-  geom_histogram(bins = 20)
-```
-
-```{r fig.width = 3, fig.height = 2}
-base_data %>%
-  ggplot(aes(x = log1p(Fish))) +
-  geom_histogram(bins = 20)
-```
-
-A `log(Fish + 1)` transform should work O.K. as it did for River Herring.
-
-# Compare "Fish" and "RH"
-```{r fig.width = 3, fig.height = 2}
-base_data %>%
-  ggplot(aes(x = log1p(RH), y = log1p(Fish))) +
-  geom_point() +
-  geom_smooth(method = 'gam', formula = y~s(x))
-```
-
-So, the two transformed measures are correlated, as expected. They diverge 
-where river herring abundance is low.
-
 # Model of Fish Abundance
 ```{r}
 fish_lmer <- lmer(log1p(Fish) ~ Station * Season +
@@ -232,8 +206,8 @@ fish_lmer <- lmer(log1p(Fish) ~ Station * Season +
                      log(Turb) + 
                      log(Chl) + 
                      log1p(combined_density) + 
-                     (1 | Yearf) + (1 | sample_event),
-                   data = base_data, na.action = na.omit)
+                     (1 | Yearf) + (1 | Yearf:sample_event),
+                   data = base_data, na.action = na.omit, REML = FALSE)
 #summary(fish_lmer)
 ```
 
@@ -249,10 +223,15 @@ The `lmerTest` package includes a backward elimination algorithm that first
 searches for random effects that provide little explanatory power (by likelihood
 ratio test), then for fixed effects that can be dropped.
 ```{r}
-(fish_step <- step(fish_lmer, 
+(fish_step_0 <- step(fish_lmer, 
+                   #reduce.random = FALSE,  # add to not drop random terms
                    #keep = c('Station', 'Season')
                    ))
-fish_step <- get_model(fish_step)
+fish_step_0 <- get_model(fish_step_0)
+```
+
+```{r}
+anova(fish_step_0, type = "I")
 ```
 
 Stepwise elimination can change what appears to be important in the model.
@@ -262,7 +241,7 @@ and Salinity changes.  One way to think about this is to say that given the
 Station you are sampling, salinity matters, but if you don't know where you are 
 in the estuary, the effect of Salinity gets swamped out by differences between 
 locations. This is a great example of Simpson's Paradox. Dropping Station
-from the model gives misleading results.
+from the model here probably gives misleading results.
 
 I run the stepwise model selection again, specify that we want to keep the 
 "experimental variables" (Station and Season) in the model. I also shift the
@@ -270,17 +249,62 @@ threshold for dropping a fixed effect from P> 0.05 to P> 0.10, to make this
 step more conservative.
 
 ```{r}
-(fish_step <- step(fish_lmer, alpha.fixed = 0.1,
+(fish_step_1 <- step(fish_lmer, alpha.fixed = 0.1,
+                   #reduce.random = FALSE,  # add to not drop random terms
                    keep = c('Station', 'Season')
                    ))
-fish_step <- get_model(fish_step)
+fish_step_1 <- get_model(fish_step_1)
 ```
 
-Note that now Salinity is retained as an important variable, and temperature is 
-retained because it is marginally significant.
+```{r}
+anova(fish_step_1)
+```
+
+Note that this model has four more parameters, and reduces the residual sums of 
+squares and and mean square slightly.
+
+Now Salinity is retained as an important variable, and temperature is 
+retained because it is marginally significant.  Both of our "random" factors 
+were still dropped.  
+
+Dropping the random factors may also not be especially appropriate, if we
+believe that year and Sample Event represent important groups of correlated
+observations. Dropping `Yearf`, in particular, may also risk Simpson's Paradox,
+since effects of other predictors could be swamped out if year to year 
+variation is sufficiently large.
+
+The case for retaining `Yearf` on first principals is pretty strong, 
+regardless of whether  the random term is important by likelihood ratio test
+or not. The case for Sample_Event, less so.  Here, I simply prevent `step()` 
+from removing the two random terms.
+
+```{r}
+(fish_step_2 <- step(fish_lmer, alpha.fixed = 0.1,
+                   reduce.random = FALSE,  # add to not drop random terms
+                   keep = c('Station', 'Season')
+                   ))
+fish_step_2 <- get_model(fish_step_2)
+```
+
+```{r}
+anova(fish_step_2)
+```
+
+And now TEMPERATURE drops out of the model, but both Season and Station now 
+look important.  This model produces results that are qualitatively similar to
+the GAM model that includes both random factors
+
+```{r}
+AIC(fish_step_0, fish_step_1, fish_step_2)
+
+```
+
+
+
+
 
 ## Reduced Model
-Given the likely importance of key predictors, and hte possibility of Simpson's
+Given the likely importance of key predictors, and the possibility of Simpson's
 Paradox here, we expand the reduced model to include possible interaction terms.
 ```{r}
 fish_red_1 <- lm(log1p(Fish) ~  (Station + Season)* (Sal + Temp),
@@ -312,11 +336,16 @@ explanatory power by AIC.
 summary(fish_red_2)
 ```
 
-* Salinity matters, with higher fish abundance at higher salinities
+* Salinity matters, with higher fish abundance at higher salinities.  That may
+  reflect the limits of the model for fitting very low salinity samples with a
+  linear model.
 
 * But maybe not so much in the fall, when salinities are high everywhere anyway
 
 * Temperature also matters, with higher fish abundances at higher temperatures
+
+* This Model suggests different environmental variables matter compared to the 
+  GAM model.
 
 ###  Some Model Diagnostics
 ```{r}

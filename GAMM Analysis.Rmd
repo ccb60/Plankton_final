@@ -1,5 +1,5 @@
 ---
-title: "GAMs to Analyze Plankton Comunity Using Fish, not River Herring"
+title: "GAMs to Analyze Plankton Comunity"
 author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
 date: "6/16/2022"
 output:
@@ -121,50 +121,16 @@ head(base_data)
 rm(station_data)
 ```
 
-### Add Transformed Predictors
-We can treat the sampling history as "spring", "summer" and "fall" observations 
-each year from 2013 through 2017.  This breaks the temporal pattern down 
-into integer valued time, generating a "quasi regular" time series, and
-allowing us to simplify the analysis of temporal autocorrelation.  The "real 
-world" time difference across the winter is longer that between seasons, but  I
-could not find a ready way to address that.
+### Add Sample Event Predictor
 
-We need both the numerical sequence and a factor later, for different purposes.
+For this analysis, we need a factor for each sample event, to be fit (or not) as
+a random factor in the GAMM models.
 
 ```{r}
 base_data <- base_data %>%
   mutate(sample_seq = as.numeric(Season) + (Year-2013)*3,
          sample_event = factor(sample_seq))
 ```
-
-
-# Check Distributuion of the "Fish" Abundance
-```{r fig.width = 3, fig.height = 2}
-base_data %>%
-  ggplot(aes(x = Fish)) +
-  geom_histogram(bins = 20)
-```
-
-```{r fig.width = 3, fig.height = 2}
-base_data %>%
-  ggplot(aes(x = log1p(Fish))) +
-  geom_histogram(bins = 20)
-```
-
-A log transform should work O.K. as it did for River Herring, so all code should
-run just changing "RH" to "Fish"...
-
-# Compare "Fish" and "RH"
-```{r fig.width = 3, fig.height = 2}
-base_data %>%
-  ggplot(aes(x = log1p(RH), y = log1p(Fish))) +
-  geom_point() +
-  geom_smooth(method = 'gam', formula = y~s(x))
-```
-
-So, the two transformed measures are correlated, as expected. They diverge 
-where river herring abundance is low.
-
 
 # Model of Fish Abundance
 ```{r}
@@ -177,20 +143,14 @@ fish_gam <- gamm(log1p(Fish) ~ Station +
                      s(log1p(combined_density),bs="ts"),
                    random = list(Yearf = ~ 1, sample_event = ~ 1),
                    data = base_data, family = 'gaussian')
-summary(fish_gam$gam)
-```
-
-```{r}
 anova(fish_gam$gam)
 ```
 
-In comparison to the River Herring model, Station is no longer statistically 
-significant by ANOVA, but Season is. Salinity is now only marginally 
-significant.
+```{r}
+summary(fish_gam$gam)
+```
 
-My instinct here would be to simplify this model and see if that clarifies 
-relationships any. We're carrying a lot of predictors that have low effect
-in these models, which may nevertheless alter interpretation of the other terms.
+Fish abundance is significantly predicted ONLY by Season, and not by any of the environmental predictors, although the Salinity smoother is nearly significant.
 
 ## Station and Season (Station not significant)
 ```{r fig.width = 3, fig.height = 2}
@@ -223,6 +183,56 @@ par(oldpar)
 
 The model is pretty good, with only slightly skewed residuals.
 
+
+```{r}
+concurvity(fish_gam$gam)
+```
+
+## Preliminary Conclusions
+My instinct here would be to simplify this model and see if that clarifies 
+relationships any. We're carrying a lot of predictors that have low effect
+in these models, which may reduce statistical power or alter interpretation of 
+the other terms.
+
+## Reduced Complexity Model
+Nothing I've done suggests turbidity or chlorophyll are major predictors, so I
+drop them. While `gamm()` does not make it easy to evaluate the importance of
+random factors, other evidence suggests the `Sample_Event` random factor does
+not help model fit, and the theoretical justification for including it in the
+model is fairly we, so I COULD dop that drop that as well.
+```{r}
+fish_gam_2<- gamm(log1p(Fish) ~ Station +
+                     Season +
+                     s(Temp, bs="ts") +
+                     s(Sal, bs="ts") +
+                     s(log1p(combined_density),bs="ts"),
+                   random = list(Yearf = ~ 1, sample_event = ~ 1),
+                   data = base_data, family = 'gaussian')
+anova(fish_gam_2$gam)
+```
+
+```{r}
+fish_gam_3<- gam(log1p(Fish) ~ 
+                    # Station +
+                    # Season +
+                     Yearf +
+                     s(Temp, bs="ts") +
+                     s(Sal, bs="ts") +
+                     s(log1p(combined_density),bs="ts")
+                   ,
+                   data = base_data, family = 'gaussian')
+
+concurvity(fish_gam_3)
+```
+
+```{r}
+concurvity(fish_gam_3, full = FALSE)
+```
+
+
+
+
+
 # Total Zooplankton Density
 ## Summary and Anova
 ```{r}
@@ -238,33 +248,6 @@ density_gam_fish <- gamm(log(combined_density) ~
                         data = base_data, family = 'gaussian')
 summary(density_gam_fish$gam)
 ```
-
-## Comparison to River Herring Model
-```{r}
-density_gam_rh<- gamm(log(combined_density) ~ 
-                          Station + 
-                          Season +
-                          s(Temp, bs="ts") +
-                          s(Sal, bs="ts") + 
-                          s(log(Turb), bs="ts") + 
-                          s(log(Chl), bs="ts") + 
-                          s(log1p(RH),bs="ts"),
-                        random = list(Yearf = ~ 1, sample_event = ~ 1),
-                        data = base_data, family = 'gaussian')
-
-anova(density_gam_fish$lme, density_gam_rh$lme)
-```
-
-So, in this particular test, the different fish predictors make essentially 
-no difference.  I reviewed parameter values (not shown), and the don't
-change. I suppose that is not too surprising, given that River Herring was not
-an important predictor....
-
-```{r}
-anova(density_gam_fish$gam)
-```
-Station, Season, Salinity, Turbidity, and CHlorophyll are all significnat
-predictors in this model.
 
 ## Station and Season
 ```{r fig.width = 3, fig.height = 2}
