@@ -30,7 +30,7 @@ ecotones themselves shape the spatio-temporal structure of both "predictors" and
 
 In this notebook, I look at ideas for graphically depicting the spatio-temporal 
 structure of all measured variable.  Other notebooks examine the use of
-sequential models and p[ath models for understanding estuary structure. Here, I 
+sequential models and path models for understanding estuary structure. Here, I 
 focus on graphic exposition only, using R and `ggplot2` as the graphics engine.
 
 # Load Libraries
@@ -140,7 +140,7 @@ long_data <- base_data %>%
 
 ## Add Fancy Labels for Figures
 These fancy labels are expressions, which allows me to include non-standard
-glyphs, greek letters, superscripts, etc.  The "plain labels" have to match
+glyphs, Greek letters, superscripts, etc.  The "plain labels" have to match
 variable names, but the other two labels are for different possible graphics
 
 ```{r} 
