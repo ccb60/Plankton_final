@@ -1,0 +1,684 @@
+---
+title: "GAMs to Analyze Plankton Community Based on Environmental Variables"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "7/21/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook provides analyses using GAMs, based on model selection
+informed by closer analysis of model colinearity and concurvidity.
+
+In this Notebook, I emphasize physical environmental variables.  The base model includes the following Fixed Effects predictors:
+
+* Temperature  
+* Salinity  
+* log(Turb)  
+* log(Chl)  
+* log1p(Fish)  
+
+Year is included in the model as a random effect largely to reduce
+unexplained variance in the model.
+
+This means these models omit:
+
+*  Discharge (highly colinear with other predictors),  
+*  Oxygen Saturation (Incomplete data and Highly colinear with Temperature),  
+*  Season (Highly correlated with multiple predictors, especially Temperature)
+*  Station (Moderately correlated with Salinity and Temperature)
+*  Sample Event (inclusion as a random factor often led to overspecified models
+     and it seldom proved important)
+
+# Load Libraries
+```{r libraries}
+library(tidyverse)
+library(readxl)
+library(mgcv)      # for GAM models
+library(emmeans)   # For extracting useful "marginal" model summaries
+```
+
+# Set Graphics Theme
+This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
+format suitable for (some) publications.
+```{r set_theme}
+theme_set(theme_classic())
+```
+
+# Input Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+```
+
+## Load Data
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+```
+```{r}
+names(station_data)[10:12]
+```
+
+
+```{r}
+names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
+```
+
+
+Station names are arbitrary, and Erin previously expressed interest in renaming 
+them from Stations 2, 4, 5 and 8 to Stations 1,2,3,and 4.
+
+The `factor()` function by default sorts levels before assigning numeric codes,
+so a convenient way to replace the existing station codes with sequential
+numbers is to create a factor and extract the numeric indicator values with 
+`as.numeric()`.
+
+```{r change_station_names_2}
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+head(station_data)
+```
+
+### Subsetting to Desired Data Columns
+I base selection of predictor variables here on the ones used in the manuscript.
+
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         is_sp_up = season == 'Spring' & Station == 1,
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Density = combined_density,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         Fish = `___61`,
+         RH = Herring
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, is_sp_up, DOY, riv_km, 
+         disch_wk, disch_day, disch_max,
+         Temp, Sal, Turb, AvgTurb, DOsat, Chl, 
+         Fish, RH, 
+         Density, H, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+head(base_data)
+```
+
+```{r}
+rm(station_data)
+```
+
+## Complete Cases
+This drops only two samples, one for missing Zooplankton data, one for missing
+fish data.  We need this reduced data set to run The `step()` function. It
+makes little sense to try stepwise model selection if each time you add or 
+remove a variable, the sample you are studying changes.  Since fish is never an
+important predictor, we will want need to refit models after stepwise elimination
+to use the most complete possible data set.
+
+```{r}
+complete_data <- base_data %>%
+  select(Season, Station, Yearf,
+         is_sp_up, Temp, Sal, Turb, Chl, Fish, RH,
+         Density, H, 
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  filter(complete.cases(.))
+```
+
+## Reduced Data
+The low salinity spring samples are doing something rather different, and they
+complicate model fitting. Models are far better behaved if we exclude a few
+extreme samples.  These are low salinity low zooplankton samples.  We have two 
+complementary ways to specify which samples to omit, without just omitting
+"outliers". The first is to restrict modeling to "marine" samples over a certain salinity, and the other is to omit spring upstream samples, which include most
+of the problematic samples.
+
+```{r}
+drop_low <- complete_data %>%
+  filter(Sal > 10)    # Pulls three samples, including one fall upstream sample
+                      # a fourth low salinity sample lacks zooplankton data
+#drop_sp_up <- complete_data %>%
+#  filter(! is_sp_up)  # drops four samples
+```
+
+# Models of Fish Abundance
+## Model 1
+```{r}
+fish_gam <- gam(log1p(Fish) ~
+                  Station +
+                  s(Temp, bs="ts", k = 5) +
+                  s(Sal, bs="ts", k = 5) + 
+                  s(log(Turb), bs="ts", k = 5) + 
+                  s(log(Chl), bs="ts", k = 5) + 
+                  s(log1p(Density), bs="ts", k = 5) +
+                  s(Yearf, bs = 're'),
+                data = complete_data, family = 'gaussian')
+summary(fish_gam)
+```
+
+Note that the model only explains on the order of 33% of the variance.
+```{r}
+anova(fish_gam)
+```
+### Plot GAM Results
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam)
+par(oldpar)
+```
+The GAM fit is highly influenced by a low Density sample with very few fish.
+
+### Concurvidity Analysis
+A common recommendation is that values over 0.8 are problematic. We have a few 
+values  close to that cutoff.  This analysis, however, is sometimes
+misleading with shrinkage estimators, as some terms are nearly removed from the
+model. Nevertheless, this model is troubling.
+
+We could get away with including Station in a linear model, but with the GAMs, 
+it appears the model including Station has too many problems with
+concurvity.
+
+```{r}
+concurvity(fish_gam)
+```
+## Simplified Model
+```{r}
+fish_gam_2 <- update( fish_gam, .~.-Station)
+concurvity(fish_gam_2)
+```
+
+```{r}
+summary(fish_gam_2)
+```
+
+```{r}
+anova(fish_gam_2)
+```
+
+### Plot GAM Results
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam_2)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(fish_gam_2)
+par(oldpar)
+```
+
+The model is pretty good, with  slightly skewed and slightly heavy tails
+to the residuals and one moderate outlier.
+
+## Model on Reduced Data
+We refit to data that omits samples where salinity was below 10 PSU. Based on
+our prior analysis, we omit Station as a predictor again, to avoid concurvity
+issues.
+
+This reduced data set drops he lowest fish abundance sample in the data set, 
+because it happened to coincide with a low salinity (and low plankton density 
+sample.
+
+```{r}
+fish_gam_no_low <- gam(log1p(Fish) ~
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(Density), bs="ts", k = 5) +
+                     s(Yearf, bs = 're'),
+                     data = drop_low, family = 'gaussian')
+summary(fish_gam_no_low)
+```
+
+This model explains under 25% of the variance.  The equivalent linear model 
+failed to identify any statistically significant predictors, which highlights
+the importance of not quite linear relationships.
+
+```{r}
+anova(fish_gam_no_low)
+```
+### Plot GAM Results
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam_no_low)
+par(oldpar)
+```
+
+Overall, fish abundance is high at very low chlorophyll and drops off at 
+log(chlorophyll) ~= 1, or Chlorophyll ~ 2.7. Fish also tends to be
+less abundant under low turbidity conditions, but the relationship has high uncertainty.
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(fish_gam_no_low)
+par(oldpar)
+```
+
+That model is fairly robust, although it shows some signs of kurtosis.
+
+## Reduced Complexity Model
+I drop Temperature, Salinity and Zooplankton density, none of which are significant individually or collectively in various intermediate models not shown)
+
+What remains significant is chlorophyll.  
+
+```{r}
+fish_gam_reduced <- gam(log1p(Fish) ~
+                     #s(Temp, bs="ts", k = 5) +
+                     #s(Sal, bs="ts", k = 5) + 
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5)  + 
+                     #s(log1p(Density), bs="ts", k = 5)  +
+                     s(Yearf, bs = 're'),
+                     data = drop_low, family = 'gaussian')
+summary(fish_gam_reduced)
+```
+
+```{r fig.height = 2.5, fig.width = 7}
+oldpar <- par(mfrow = c(1,3))
+plot(fish_gam_reduced)
+par(oldpar)
+```
+
+The reduced model has no impact on the basic conclusions of the model.
+
+# Total Zooplankton Density
+I fit the simplified model without Station.  The full model has the same
+concurvity problems as before, and here the model fails to converge.  While I
+could alter the convergence criteria to search for a solution, we know the model
+that includes Station will have concurvity problems, so there is little point.
+
+## Model 1
+```{r}
+density_gam<- gam(log(Density) ~ 
+                          s(Temp, bs="ts", k = 5) +
+                          s(Sal, bs="ts", k = 5) + 
+                          s(log(Turb), bs="ts", k = 5) + 
+                          s(log(Chl), bs="ts", k = 5) + 
+                          s(log1p(Fish),bs="ts", k = 5) +
+                          s(Yearf, bs = 're'), 
+                        data = complete_data, family = 'gaussian')
+concurvity(density_gam)
+```
+
+```{r}
+summary(density_gam)
+```
+
+```{r}
+anova(density_gam)
+```
+
+
+### Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(density_gam)
+par(oldpar)
+```
+
+The only significnatly non-linear response is the response for salinity,
+which appears to be driven by a few very low salinity samples.
+
+## Model on Reduced Data
+```{r}
+density_gam_no_low<- gam(log(Density) ~ 
+                          s(Temp, bs="ts", k = 5) +
+                          s(Sal, bs="ts", k = 5) + 
+                          s(log(Turb), bs="ts", k = 5) + 
+                          s(log(Chl), bs="ts", k = 5) + 
+                          s(log1p(Fish),bs="ts", k = 5) +
+                          s(Yearf, bs = 're'), 
+                        data = drop_low, family = 'gaussian')
+summary(density_gam_no_low)
+```
+
+```{r}
+anova(density_gam_no_low)
+```
+
+## Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(density_gam_no_low)
+par(oldpar)
+```
+
+## Reduced Complexity Model
+```{r}
+density_gam_reduced<- gam(log(Density) ~ 
+                          #s(Temp, bs="ts", k = 5) +
+                          #s(Sal, bs="ts", k = 5) + 
+                          s(log(Turb), bs="ts", k = 5) + 
+                          s(log(Chl), bs="ts", k = 5) + 
+                          #s(log1p(Fish),bs="ts", k = 5) +
+                          s(Yearf, bs = 're'), 
+                        data = drop_low, family = 'gaussian')
+summary(density_gam_reduced)
+
+```
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(density_gam_reduced)
+par(oldpar)
+```
+Again, results are little affected by removing non-significant terms.  Even this
+simple model predicts on the order of 60% of the variance.
+
+# Shannon Diversity
+## Model 1
+```{r}
+shannon_gam <- gam(H ~ 
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(Fish),bs="ts", k = 5) +
+                     s(Yearf, bs = 're'),
+                   data = complete_data, family = 'gaussian')
+summary(shannon_gam)
+```
+
+```{r}
+anova(shannon_gam)
+```
+
+### Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam)
+par(oldpar)
+```
+
+Again, the relationship with salinity appear principally driven by a couple of
+very low salinity outliers.
+
+## Model on Reduced Data
+```{r}
+shannon_gam_no_low <- gam(H ~ 
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(Fish),bs="ts", k = 5) +
+                     s(Yearf, bs = 're'),
+                   data = drop_low, family = 'gaussian')
+summary(shannon_gam_no_low)
+```
+
+```{r}
+anova(shannon_gam_no_low)
+```
+
+### Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam_no_low)
+par(oldpar)
+```
+Plankton diversity is highest at low temperatures and at intermediate levels
+of chlorophyll.  Neither of those patterns was uncovered by the linear model
+analysis.
+
+## Diagnostic Plots
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(shannon_gam_no_low)
+par(oldpar)
+```
+
+Model looks excellent.
+
+# Single Species Models
+## Model Choice
+Our model alternatives are similar to the choices we had for the Total Density 
+model. The problem is, we can't use any of the continuous data distributions in 
+GAMS with zero values (at least relying on the canonical link functions) because
+(log(0) = -Inf; 1/0 = Inf, 1 / 0*0 = Inf). The easiest solution is to add some 
+finite small quantity to the density data, and predict that. Here we predict
+log(Density + 1) using Gaussian models.
+
+## Automating Analysis of Separate Species
+I'm going to automate analysis of all selected species by using a "nested"
+Tibble.  This is a convenient alternative to writing a "for" loop to run
+multiple identical analyses.
+
+I create a "long" data source, based on the reduced data set that omits low
+salinity samples.
+
+```{r}
+spp_data <- drop_low %>%
+  select(Yearf, Season, Station, Temp,
+          Sal, Turb, Chl, Fish, 
+          Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  pivot_longer(-c(Yearf:Fish), names_to = 'Species', values_to = 'Density')
+```
+
+Next, I create a function to run the analysis.  This function takes a data frame
+or tibble as an argument.  The tibble mush have data columns with the correct 
+names.
+
+The initial model fits for some species had a lot of wiggles in them, to an 
+extent that I thought did not make much scientific sense, so I decided to reduce
+the dimensionality of the GAM smoothers, by adding the parameter `k= 4`. Lowe
+numbers constrain the GAM to fit smoother lines.
+
+```{r}
+my_gam <- function(.dat) {
+  
+  gam(log1p(Density) ~ 
+        s(Temp, bs="ts", k = 5) +
+        s(Sal, bs="ts", k = 5) + 
+        s(log(Turb), bs="ts", k = 5) + 
+        s(log(Chl), bs="ts", k = 5) + 
+        s(log1p(Fish),bs="ts", k = 5) +
+        s(Yearf, bs = 're'),
+      data = .dat, family = "gaussian")
+}
+```
+
+
+Next, I create the nested tibble, and conduct the analysis on each species....
+
+```{r}
+spp_analysis <- spp_data %>%
+  group_by(Species) %>%
+  nest() %>%
+  mutate(gam_mods = map(data, my_gam))
+```
+
+and finally, output the model results.  I can do that in a "for" loop, but it's 
+Awkward to look through a long list of output, so I step through each species in turn.
+
+\newpage
+## Acartia
+```{r}
+spp = 'Acartia'
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod)
+cat('\n')
+anova(mod)
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod)
+par(oldpar)
+```
+
+
+\newpage
+## Balanus
+```{r}
+spp = 'Balanus'
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod)
+cat('\n')
+anova(mod)
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod)
+par(oldpar)
+```
+
+\newpage
+##  Eurytemora
+
+```{r}
+spp =  "Eurytemora" 
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod)
+cat('\n')
+anova(mod)
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod)
+par(oldpar)
+```
+
+\newpage
+## Polychaete
+```{r}
+spp =  "Polychaete" 
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod)
+cat('\n')
+anova(mod)
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod)
+par(oldpar)
+```
+
+\newpage
+## Pseudocal
+```{r}
+spp =  "Pseudocal"
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod)
+cat('\n')
+anova(mod)
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod)
+par(oldpar)
+```
+
+\newpage
+## Temora
+```{r}
+spp =  "Temora"   
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod)
+cat('\n')
+anova(mod)
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod)
+par(oldpar)
+```
+
