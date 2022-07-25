@@ -33,13 +33,24 @@ The flow of analyses is as follows:
    examine major relationships with predictors on a graphic basis.
 
 3. Conduct a linear analysis of the relationship between GAM output and
-   each predictor, using the `envfit()` function from `vegan`.
+   each predictor, using the `envfit()` function from `vegan`. This looks for 
+   the best linear combination of the NMDS axes for predicting the environmental
+   variables, not the other way around, but it is a fairly standard method.
    
-4. Conduct GAM analyses of the synthetic NMDS axis scores, based on GAM models
-   that follow the same model form as we PREVIOUSLY used to analyze zooplankton
-   abundance.
+4. Conduct GAM analyses of the NMDS axis scores, based on the FULL data.  This
+   analysis includes both GAM models based on quantitative environmental
+   predictors (mirroring the analysis of abundance and diversity in the 
+   "GAM-Analysis-Environmental.pdf" notebook) and the analysis based on Season 
+   and Station (as in the "GAM-Analysis-Season-and-Station.pdf" notebook).
+   The Season by Station analysis generally perform poorly.
+   
+5. Conduct GAM analyses of the NMDS axis scores, based on the reduced data,
+   which omits samples with salinity less than  10 PSU.  This also includes 
+   both Environmental and Season by Station analysis, for completeness.
+   
+6. Generate NMDS Graphics based on the reduced data set that omits low salinity
+   samples.
 
-5. Conduct GAM analysis based on your suggested revised analysis 
 
 # Load Libraries
 ```{r libraries}
@@ -353,7 +364,7 @@ ggplot(envNMDS, aes(MDS1, MDS2)) +
 ```
 
 That's a very similar pattern the the prior one, based on season.  The two 
-predictors are highly colinear, which may cause problems with estimation later.
+predictors are highly collinear, which may cause problems with estimation later.
 
 ## By Temperature
 ```{r, nmds_by_temp, fig.width = 3, fig.height = 2.5}
@@ -443,23 +454,31 @@ of permutations specified here helps keep those effects small.
 
 ## `envfit()` Single Variable Relationships
 ```{r env_fit}
-ef <- envfit(NMDSE, envNMDS[,c(1, 3:16)], permu = 9999, na.rm = TRUE)
+ef <- envfit(NMDSE, envNMDS[,c(1, 3:17)], permu = 9999, na.rm = TRUE)
 ef
 ```
 
-### Missing Values
+#### A Note on theMissing Values
 Note 13 observations deleted due to missingness. Those are the 2013 data, which
 lacks DO saturation data. We can refit to include those data by dropping DO as a
 predictor.  That might alter some fits.
 
+
+```{r}
+names(envNMDS)
+```
+
 ## `envfit()` Not Including Oxygen
+When we drop oxygen and base the results on the whole data set -- including
+2013, the turbidity patterns vanish.
+
 ```{r env_fit_2}
-ef_2 <- envfit(NMDSE, envNMDS[,c(1, 3:8, 10:16)], permu = 9999, na.rm = TRUE)
+ef_2 <- envfit(NMDSE, envNMDS[,c(1, 3:9, 11:17)], permu = 9999, na.rm = TRUE)
 ef_2
 ```
 
 Note that River Herring and log(River Herring + 1) are significantly correlated
-with the MSDS, while total fish is at best marginally significantly correlated.
+with the MSDS, while total fish is at best marginally correlated.
 
 ## Extracting Vector Information 
 The `ef` or `ef_2` object is an `envfit` S3 object, with three named slots. The
@@ -489,8 +508,8 @@ linear combination of NMDS Axis 1 and Axis 2 and each environmental variable.
 
 It's worth pointing out that the r values are mostly pretty low. The NMDS
 ordination does not do a very good job of "predicting" environmental variables,
-except for Temperature, which it does quite well. Here are the implied
-correlation coefficients:
+except for Discharge and Temperature, which it does quite well. Here are the
+implied correlation coefficients:
 
 ```{r}
 sqrt(ef_2$vectors$r)
@@ -511,21 +530,20 @@ scaled_arrows <- as_tibble(arrows*sqrt(rsq)) %>%
 ```
 
 ```{r anotation_positions_1}
-scale_factor = .15  # Scale position of text annotations this far off
-                    # end or arrow
+scale_factor = .2  # This scales the relative length of the arrows. 
+                    # it is selected largely for graphic convenience.
 
 scaled_arrows <- scaled_arrows %>%
-  mutate(ann_xpos = NMDS1 + arrows[,1] * scale_factor,
+  mutate(ann_xpos = NMDS1 + arrows[,1]* scale_factor, #arrows is unscaled
+                                                      # creates constant spacing
          ann_ypos = NMDS2 + arrows[,2] * scale_factor)
 ```
 
-While we are creating vectors, we also want to create points for placing the 
-annotations identifying each vector. We want to space the labels so they are a
-fixed distance beyond the end of each vector. We do that with a little vector 
-addition.
+While we are creating vectors, we also want to place the text annotations identifying each vector. We want to space the labels so they are a fixed 
+distance beyond the end of each vector with a little vector arithmetic.
 
 ## Draft Graphic
-```{r draft_arrow_plot_1}
+```{r draft_arrow_plot}
 plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
   geom_point(aes(color = Season), size = 2.5) +
   geom_segment(data=scaled_arrows,  
@@ -536,7 +554,7 @@ plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) +
                           y= ann_ypos,label=parameter),
             size=4, nudge_x =0, nudge_y = 0, hjust = .5)+
   scale_color_viridis_d(option = 'C', name = 'Season') +
-  coord_fixed()
+  coord_fixed(xlim =c(-1.35, 1.35))
 plt
 ```
 
@@ -551,34 +569,41 @@ not to exceed 235 mm. Presumably that corresponds to 1,2,3,or 4 columns wide?
 39 mm is about one and one half inches, which his quite small, so we will use
 the 84 mm wide option, which is about 3.3 inches.
 
-### All (Transformed) Environmental Variables
+### Transformed Environmental Variables
+We drop the untransformed explanatory variables.  We retain Discharge here, even
+though we did not use it in any final models because of collinearity.
+
 ```{r draft_arrow_plot_2, fig.width = 3.3, fig.height = 3.3}
 tmp_arrows <- scaled_arrows %>%
   filter(parameter %in% c('disch_wk', 'Temp', 'Sal', 'Turb2', 'Chl2', 
-                          'Fish2', 'RH2')) %>%
+                          'Fish2')) %>%
   mutate(parameter = if_else( parameter == 'disch_wk','Discharge', parameter)) %>%
   mutate(parameter = factor(parameter,
                             levels = c("Discharge", 'Temp', 'Sal', 
                                        'Turb2', 'Chl2', 
-                                       'Fish2', 'RH2'),
-                            labels = c('Discharge', 'Temp', 'Sal', 
+                                       'Fish2'),
+                            labels = c('Disch', 'Temp', 'Sal', 
                                        'Turb', 'Chl', 
-                                      'Fish', 'RH')))
+                                      'Fish'))) %>%
+  mutate(ann_xpos = case_when(
+    parameter == 'Turb' ~ ann_xpos - 0.1,
+    parameter == 'Fish' ~ ann_xpos + 0.1,
+    TRUE ~ ann_xpos))
 
 plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
   geom_point(aes(color = Season, shape = Station), size = 1.5) +
   geom_segment(data=tmp_arrows,  
-               mapping = aes(x=0,xend=ann_xpos,y=0,yend=ann_ypos),
+               mapping = aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
                arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
   geom_text(data=tmp_arrows, 
-            mapping = aes(x=1.2 * ann_xpos,
-                          y=1.2 * ann_ypos,label=parameter),
+            mapping = aes(x=ann_xpos,
+                          y=ann_ypos,label=parameter),
             size=3, nudge_x =0, nudge_y = 0, hjust = .5)+
   
   scale_color_viridis_d(option = 'C', name = '') +
   scale_shape(name = 'Station') +
   
-  coord_fixed(xlim =c(-1.25, 1.25)) +
+  coord_fixed(xlim =c(-1.35, 1.35)) +
   
   guides(color = guide_legend(title.position = "bottom", 
                               title.hjust = 0.5,
@@ -591,7 +616,7 @@ plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) +
 ```
 
 
-```{r fig.width = 3.3, fig.height = 4.4}
+```{r arrow_plot_1, fig.width = 3.3, fig.height = 4.4}
 plt + 
   theme_classic(base_size = 10) + 
   theme(
@@ -601,44 +626,41 @@ plt +
         legend.margin = margin(0,0,0,0))
 ```
 
-So, we see that Discharge, Temperature, Dissolved oxygen and season are all
-strongly associated with Axis 1, but unfortunately, they are also highly 
-correlated, which is likely to pose problems for estimation in the GAM models 
-to come.
-
-```{r}
-ggsave('figures/nmds_env.png', type='cairo',
-         width = 3.3, height = 3.4)
-ggsave('figures/nmds_env.pdf', device = cairo_pdf, 
-       width = 3.3, height = 3.4)
-```
+So, we see that Discharge, and Temperature (and Oxygen Saturation, not shown
+because of missing data, and and Season, not shown because it is a factor) are
+strongly associated with Axis 1.  Unfortunately, community response to these 
+measured variables are highly correlated, which is likely to pose problems for estimation in the GAM models to come.
 
 That is still too busy.
 
-1. It is perhaps problematic to show both Fish and River Herring.
-
-2. We show several arrows that are not statistically robust. We can simplify by 
-   showing only statistically significant correlations with environmental
-   variables.
-
-### Statistically Significant Environmental Variables
+### Significant Environmental Variables
 ```{r}
-tmp <- tmp_arrows %>%
-  filter(parameter %in% c("Discharge", 'Temp', 'Chl', 'RH'))
+ef_2$vectors
+```
+Several variables showed no significant link to the NMDS plot, according to 
+the `envfit()` function output.  We can simplify one notch more by dropping
+non-significant variables.
+
+```{r}
+tmp_arrows <- scaled_arrows %>%
+  filter(parameter %in% c('disch_wk', 'Temp',  'Chl2',  'RH2')) %>%
+  mutate(parameter = factor(parameter,
+                            levels = c("disch_wk", 'Temp', 'Chl2',  'RH2'),
+                            labels = c('Disch', 'Temp',  'Chl', 'RH')))
 
 plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
   geom_point(aes(color = Season, shape = Station), size = 1.5) +
-  geom_segment(data=tmp,  
-               mapping = aes(x=0,xend=ann_xpos,y=0,yend=ann_ypos),
+  geom_segment(data=tmp_arrows,  
+               mapping = aes(x=0,xend = NMDS1,y=0,yend=NMDS2),
                arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
-  geom_text(data=tmp, 
-            mapping = aes(x=1.2 * ann_xpos,
-                          y=1.2 * ann_ypos,label=parameter),
+  geom_text(data=tmp_arrows, 
+            mapping = aes(x=ann_xpos,
+                          y=ann_ypos,label=parameter),
             size=3, nudge_x =0, nudge_y = 0, hjust = .5)+
   scale_color_viridis_d(option = 'C', name = '') +
   scale_shape(name = 'Station') +
 
-  coord_fixed(xlim =c(-1.25, 1.25)) +
+  coord_fixed(xlim =c(-1.35, 1.35)) +
   
   guides(color = guide_legend(title.position = "top", 
                               title.hjust = 0.5,
@@ -648,13 +670,12 @@ plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) +
                               title.hjust = 0.5,
                               override.aes = list(size = 2),
                               order = 2))
-rm(tmp)
 ```
 
 We can't change the figure width, but we can alter the figure height.  With 
 that in mind, let's reorient the legends and juggle dimensions
 
-```{r arrow_plot_1,, fig.width = 3.3, fig.height = 3.4}
+```{r arrow_plot_2,, fig.width = 3.3, fig.height = 3.4}
 plt + 
   theme_classic(base_size = 10) + 
   theme(
@@ -674,27 +695,37 @@ ggsave('figures/nmds_env_significant.pdf', device = cairo_pdf,
        width = 3.3, height = 3.4)
 ```
 
-### Drop River Herring
-If we don't EVER want to drag river herring in as a predictor in the manuscript,
-we should not show it in the NMDS Plots either.
+
+###  Environmental Variables Used in Models
+
+Another way to simplify is to only show variables we use in the GAM and LMER
+models.
 
 ```{r}
-tmp <- tmp_arrows %>%
-  filter(parameter %in% c("Discharge", 'Temp', 'Chl'))
+tmp_arrows <- scaled_arrows %>%
+  filter(parameter %in% c('Temp', 'Sal', 'Turb2', 'Chl2',  'Fish2')) %>%
+  mutate(parameter = factor(parameter,
+                            levels = c('Temp', 'Sal', 'Turb2', 'Chl2',  'Fish2'),
+                            labels = c('Temp', 'Sal', 'Turb', 'Chl',  'Fish'))) %>%
+  mutate(ann_xpos = case_when(
+    parameter == 'Turb' ~ ann_xpos - 0.1,
+    parameter == 'Fish' ~ ann_xpos + 0.1,
+    TRUE ~ ann_xpos))
 
 plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
   geom_point(aes(color = Season, shape = Station), size = 1.5) +
-  geom_segment(data=tmp,  
-               mapping = aes(x=0,xend=ann_xpos,y=0,yend=ann_ypos),
+  geom_segment(data=tmp_arrows,  
+               mapping = aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
                arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
-  geom_text(data=tmp, 
-            mapping = aes(x=1.2 * ann_xpos,
-                          y=1.2 * ann_ypos,label=parameter),
+  geom_text(data=tmp_arrows, 
+            mapping = aes(x=ann_xpos,
+                          y=ann_ypos,
+                          label=parameter),
             size=3, nudge_x =0, nudge_y = 0, hjust = .5)+
   scale_color_viridis_d(option = 'C', name = '') +
   scale_shape(name = 'Station') +
-  
-  coord_fixed(xlim =c(-1.25, 1.25)) +
+
+  coord_fixed(xlim =c(-1.35, 1.35)) +
   
   guides(color = guide_legend(title.position = "top", 
                               title.hjust = 0.5,
@@ -704,10 +735,9 @@ plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) +
                               title.hjust = 0.5,
                               override.aes = list(size = 2),
                               order = 2))
-rm(tmp)
 ```
 
-```{r arrow_plot_2, fig.width = 3.3, fig.height = 3.3}
+```{r arrow_plot_3,, fig.width = 3.3, fig.height = 3.4}
 plt + 
   theme_classic(base_size = 10) + 
   theme(
@@ -721,11 +751,12 @@ plt +
 ```
 
 ```{r}
-ggsave('figures/nmds_env_significant_no_RH.png', type='cairo',
+ggsave('figures/nmds_env_selected.png', type='cairo',
          width = 3.3, height = 3.4)
-ggsave('figures/nmds_env_significant_no_RH', device = cairo_pdf, 
+ggsave('figures/nmds_env_selected.pdf', device = cairo_pdf, 
        width = 3.3, height = 3.4)
 ```
+
 
 ## Qualitative Conclusions
 
@@ -739,10 +770,13 @@ ggsave('figures/nmds_env_significant_no_RH', device = cairo_pdf,
    that cause problems fitting many of our models.  The second axis is not 
    especially correlated with ANY of the environmental variables.
 
-*  I am uncertain how to interpret the Chlorophyll association.
+*  I run the GAM analysis without the low salinity oddball samples
+   later in this notebook, but did not produce any graphics there.  It 
+   would not be hard to do so.
 
-# Environmental Drivers GAM Analysis (Full Data)
-## Axis 1
+# GAM Analysis (Full Data)
+## Environmental Drivers 
+### Axis 1
 Note I increase the iterations to fit the model.  This probably means the 
 gradient near the solution is low, so parameter estimates may not be very good.
 
@@ -784,7 +818,7 @@ par(oldpar)
 
 The model is fairly well behaved. No obvious problems here.
 
-## Axis 2
+### Axis 2
 ```{r}
 gam_2_1 <- gam(MDS2 ~ 
                s(Temp, bs="ts", k = 5) +
@@ -817,13 +851,13 @@ plot in NMDS space in the lower left, far from most Station 1 samples, so the
 GAM smoother fits a strong change in axis 2 scores to better predict those 
 low salinity, early spring "washout" samples.
 
-# Season and Station GAM Analysis -- Full Data
+## Season and Station GAM Analysis -- Full Data
 Recall that the alternative way of constructing a GAM drops quantitative 
 predictors Temperature and Salinity and retains Station and Season as factors.
 I Include these models for completeness.  I did double check concurvity and 
 standard GAM diagnostics, but saw no problems, so do not present them here.
 
-## Axis 1
+### Axis 1
 ```{r}
 ss_gam_1_1 <- gam(MDS1 ~ 
                   Station +
@@ -877,7 +911,7 @@ plot(emms) +
   xlab('NMDS Axis 1 Score')
 ```
 
-## Axis 2
+### Axis 2
 ```{r}
 ss_gam_2_1 <- gam(MDS2 ~ 
                   Station +
@@ -927,14 +961,15 @@ plot(emms) +
   xlab('NMDS Axis 2 Score')
 ```
 
-# Envrionmental Drivers Gam Analysis -- Reduced Data
-## Rerun NMDS
-First we need to rerun the NMDS analysis, omitting the low salinity samples.
+# Gam Analysis -- Reduced Data
+## Preparation
+We need to rerun the NMDS analysis, omitting the low salinity samples.
 While that should not alter the NMDS much, it at  produces NMDS scores
-based on the same sample as we will use to fit the GAM.
+based on the same sample as we will use to fit the GAM. 
 
 ### Omit Low Salinity Samples 
-We have to be careful to do this for BOTH Environmental Data and community data.
+We have to be careful to do this for **both** Environmental Data and community data.
+
 ```{r}
 # First confirm alignment of samples
 zoopl2 <- zoopl2 %>%
@@ -946,28 +981,15 @@ station_data <- station_data %>%
 dont_drop <- which(station_data$Sal >= 10)
 zoopl3<-zoopl2[dont_drop, ]
 station_data_3 <- station_data[dont_drop,]
-```
 
-Assemble the species only data set for NMDS analysis.
-
-```{r}
+# Assemble the species only data set for NMDS analysis.
 CDATA3 <- zoopl3[,-c(1:4)]
 ```
 
-### NMDS Analyses (Reduced Data)
+### NMDS Analyses on Reduced Data
 ```{r nmds_no_low}
 NMDSE3 <- metaMDS(CDATA3, autotransform = FALSE, k = 2, trymax = 75)
 NMDSE3
-```
-
-#### Plot
-```{r plot_nmds_no_low}
-plot(NMDSE3, type = 'p')
-```
-
-#### Plot Species
-```{r plot_nmds_spp_no_low, fig.width = 7, fig.height = 5}
-plot(NMDSE, 'species', type = 't')
 ```
 
 ### Combining the NMDS Results with Environmental Data
@@ -985,8 +1007,33 @@ envNMDS3 <- station_data_3 %>%
   cbind(as_tibble(NMDSE3$points))
 ```
 
-### Envrionmental Gam Analysis
-#### Axis 1
+####  Plot NMDS By Season
+```{r, nmds_by_Season_2, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS3, aes(MDS1, MDS2)) +
+  geom_point(aes(color=Season)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+The overall shape of the NMDS plot is nearly unchanged, and Axis 1 still shows
+**strong** association with season.
+
+#### Plot NMDS By Station
+```{r nmds_by_station_2, fig.width = 3, fig.height = 2.5}
+ggplot(envNMDS3, aes(MDS1, MDS2)) +
+    geom_point(aes(color=Station)) +
+  xlim(c(-1.5,1)) +
+  ylim(c(-1.5,1)) +
+  theme(aspect.ratio=1)
+```
+
+The two "weird" station 1 samples that plotted to the lower left are
+now gone. This makes the association of Axis 2 with Station a little more
+obvious.
+
+## Environmental Drivers
+### Axis 1
 ```{r}
 gam_1_1_no_low <- gam(MDS1 ~ 
                s(Temp, bs="ts", k = 5) +
@@ -1005,7 +1052,7 @@ plot(gam_1_1_no_low)
 par(oldpar)
 ```
 
-#### Axis 2
+### Axis 2
 ```{r}
 gam_2_1_no_low <- gam(MDS2 ~ 
                s(Temp, bs="ts", k = 5) +
@@ -1024,12 +1071,12 @@ plot(gam_2_1_no_low)
 par(oldpar)
 ```
 
-# Season and Station GAM Analysis -- Full Data
+## Season and Station GAM Analysis -- Full Data
 Recall that the alternative way of constructing a GAM drops quantitative 
 predictors Temperature and Salinity and retains Station and Season as factors.
 I Include these models for completeness.
 
-## Axis 1
+### Axis 1
 In a Season and Station model, axis 1 shows strong relationship to Season, and a 
 possible relationship to Station as well.
 
@@ -1093,7 +1140,7 @@ plot(emms) +
 ```
 
 
-## Axis 2
+### Axis 2
 ```{r}
 ss_gam_2_1_no_low <- gam(MDS2 ~ 
                   Station +
@@ -1147,3 +1194,154 @@ plot(emms) +
   xlab('NMDS Axis 2 Score')
 ```
 
+
+## Possible Publication Graphics -- Reduced Data Set
+### Run `envfit`
+```{r}
+ef_3 <- envfit(NMDSE3, envNMDS3[,c(1, 3:9, 11:17)], permu = 9999, na.rm = TRUE)
+ef_3
+```
+
+## Extract Vector Information
+```{r scaled_arrows_2}
+arrows <- ef_3$vectors$arrows
+rsq    <- ef_3$vectors$r
+scaled_arrows <- as_tibble(arrows*sqrt(rsq)) %>%  
+  mutate(parameter = rownames(arrows))
+```
+
+```{r anotation_positions_2}
+scale_factor = .15  # Scale position of text annotations this far off
+                    # end or arrow
+
+scaled_arrows <- scaled_arrows %>%
+  mutate(ann_xpos = NMDS1 + arrows[,1] * scale_factor,
+         ann_ypos = NMDS2 + arrows[,2] * scale_factor)
+```
+
+While we are creating vectors, we also want to create points for placing the 
+annotations identifying each vector. We want to space the labels so they are a
+fixed distance beyond the end of each vector. We do that with a little vector 
+addition.
+
+### Environmental Variables Used in Models
+```{r arrow_plot_5, fig.width = 3.3, fig.height = 3.3}
+tmp_arrows <- scaled_arrows %>%
+  filter(parameter %in% c('Temp', 'Sal', 'Turb2', 'Chl2', 'Fish2')) %>%
+  mutate(parameter = factor(parameter,
+                            levels = c('Temp', 'Sal', 
+                                       'Turb2', 'Chl2', 'Fish2'),
+                            labels = c('Temp', 'Sal', 
+                                       'Turb', 'Chl', 'Fish')))  %>%
+   mutate(ann_xpos = case_when(
+     parameter == 'Sal' ~ ann_xpos - 0.1,
+     TRUE ~ ann_xpos))
+
+plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
+  geom_point(aes(color = Season, shape = Station), size = 1.5) +
+  geom_segment(data=tmp_arrows,  
+               mapping = aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
+               arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
+  geom_text(data=tmp_arrows, 
+            mapping = aes(x=ann_xpos,
+                          y=ann_ypos,label=parameter),
+            size=3, nudge_x =0, nudge_y = 0, hjust = .25)+
+  
+  scale_color_viridis_d(option = 'C', name = '') +
+  scale_shape(name = 'Station') +
+  
+  coord_fixed(xlim =c(-1.35, 1.35)) +
+  
+  guides(color = guide_legend(title.position = "bottom", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 1),
+         shape = guide_legend(title.position = "bottom", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 2))
+```
+
+
+```{r fig.width = 3.3, fig.height = 4.4}
+plt + 
+  theme_classic(base_size = 10) + 
+  theme(
+        legend.position = 'bottom',
+        legend.box = 'Vertical',
+        legend.spacing.y = unit(0, 'cm'),
+        legend.margin = margin(0,0,0,0))
+```
+
+
+```{r}
+ggsave('figures/nmds_env_selected_no_low.png', type='cairo',
+         width = 3.3, height = 3.4)
+ggsave('figures/nmds_env_selected_no_low.pdf', device = cairo_pdf, 
+       width = 3.3, height = 3.4)
+```
+
+
+```{r}
+ef_3$vectors
+```
+
+### Significant Environmental Variables Used on Models
+```{r}
+tmp_arrows <- scaled_arrows %>%
+  filter(parameter %in% c('Temp', 'Sal', 'Chl2')) %>%
+  mutate(parameter = factor(parameter,
+                            levels = c('Temp', 'Sal', 'Chl2'),
+                            labels = c('Temp', 'Sal', 'Chl')))  %>%
+   mutate(ann_xpos = case_when(
+     parameter == 'Sal' ~ ann_xpos - 0.1,
+     TRUE ~ ann_xpos))
+
+plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) + 
+  geom_point(aes(color = Season, shape = Station), size = 1.5) +
+  geom_segment(data=tmp_arrows,  
+               mapping = aes(x=0,xend=NMDS1,y=0,yend=NMDS2),
+               arrow = arrow(length = unit(0.2, "cm")) ,colour="grey40") + 
+  geom_text(data=tmp_arrows, 
+            mapping = aes(x= ann_xpos,
+                          y= ann_ypos,
+                          label=parameter),
+            size=3, nudge_x =0, nudge_y = 0, hjust = 0.25)+
+  
+  scale_color_viridis_d(option = 'C', name = '') +
+  scale_shape(name = 'Station') +
+
+  coord_fixed(xlim =c(-1.35, 1.35)) +
+  
+  guides(color = guide_legend(title.position = "top", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 1),
+         shape = guide_legend(title.position = "left", 
+                              title.hjust = 0.5,
+                              override.aes = list(size = 2),
+                              order = 2))
+```
+
+We can't change the figure width, but we can alter the figure height.  With 
+that in mind, let's reorient the legends and juggle dimensions
+
+```{r arrow_plot_6,, fig.width = 3.3, fig.height = 3.4}
+plt + 
+  theme_classic(base_size = 10) + 
+  theme(
+        legend.position = 'bottom',
+        legend.box = 'Vertical',
+        legend.spacing.y = unit(0, 'cm'),
+        legend.box.just = 'top',
+        legend.margin = margin(0,0,0,0),
+        legend.box.margin = margin(0,0,0,0)
+        )
+```
+
+```{r}
+ggsave('figures/nmds_env_significant_no_low.png', type='cairo',
+         width = 3.3, height = 3.4)
+ggsave('figures/nmds_env_significant_no_low.pdf', device = cairo_pdf, 
+       width = 3.3, height = 3.4)
+```
