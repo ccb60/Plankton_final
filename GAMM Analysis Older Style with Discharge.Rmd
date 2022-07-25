@@ -1,0 +1,875 @@
+---
+title: "GAMs to Analyze Plankton Comunity --Older Version, with Discharge"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "6/16/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook reprises relevant analyses presented in the "Final-Gams.pdf"
+notebook, just substituting "Fish" as a predictor where previously we had looked
+at "RH, for River Herring.  Most of the code should just run "out of the box"
+based on a glopbal seach and replace.....
+
+# Load Libraries
+```{r libraries}
+library(tidyverse)
+library(readxl)
+library(mgcv)      # for GAM models
+library(emmeans)   # For extracting useful "marginal" model summaries
+```
+
+# Set Graphics Theme
+This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
+format suitable for (some) publications.
+```{r set_theme}
+theme_set(theme_classic())
+```
+
+# Input Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+```
+
+## Load Data
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+```
+
+```{r}
+names(station_data)[10:12]
+
+names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
+```
+
+
+Station names are arbitrary, and Erin previously expressed interest in renaming 
+them from Stations 2, 4, 5 and 8 to Stations 1,2,3,and 4.
+
+The `factor()` function by default sorts levels before assigning numeric codes,
+so a convenient way to replace the existing station codes with sequential
+numbers is to create a factor and extract the numeric indicator values with 
+`as.numeric()`.
+
+```{r change_station_names_2}
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+head(station_data)
+```
+
+### Subsetting to Desired Data Columns
+I base selection of predictor variables here on the ones used in the manuscript.
+
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         is_sp_up = season == 'Spring' & Station == 1,
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         Fish = `___61`,
+         RH = Herring
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, is_sp_up, DOY, riv_km, 
+         disch_wk, disch_day, disch_max,
+         Temp, Sal, Turb, AvgTurb, DOsat, Chl, 
+         Fish, RH, 
+         combined_density, H, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+head(base_data)
+```
+
+```{r}
+rm(station_data)
+```
+
+### Add Sampling Event Indicator
+We can treat the sampling history as "spring", "summer" and "fall" observations 
+each year from 2013 through 2017.  The idea of including this as a random term
+in the modle is that we might reasonably expect all samples collected on the
+same day to be "more similar" than not. 
+
+```{r}
+base_data <- base_data %>%
+  mutate( sample_event = factor(as.numeric(Season) + (Year-2013)*3))
+```
+
+## Complete Cases
+This drops only two samples, one for missing Zooplankton data, one for missing
+fish data.  We need this reduced data set to compare sequential models.
+
+```{r}
+complete_data <- base_data %>%
+  select(Season, Station, Yearf, sample_event, disch_wk,
+         is_sp_up, Temp, Sal, Turb, Chl, Fish, RH,
+         combined_density, H, 
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  filter(complete.cases(.))
+```
+
+
+# Models of Fish Abundance
+## Full model
+We need to restrict the complexity of the smoothers with `k = 5` because 
+otherwise the model is over-specified.  Given our limited data, even a fifth 
+order smoother is probably overkill.
+
+```{r}
+fish_gam <- gam(log1p(Fish) ~ Station + 
+                     Season +
+                     is_sp_up +
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts') +
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(combined_density),bs="ts", k = 5) +
+                   s(Yearf, bs = 're') ,
+                   data = base_data, family = 'gaussian')
+summary(fish_gam)
+```
+
+Season and discharge are significant here, while salinity is marginally 
+significant.
+
+This model has significant concurvity issues.
+
+```{r}
+concurvity(fish_gam)
+```
+
+But that reflects the presence of all terms in the model.  Several terms, 
+however, are  effectively removed from the model by the shrinkage estimators.  
+Here, while Temperature, Chlorophyll and Zooplankton Density are in the model 
+(and thus contribute to those "concurvidity" estimates), they have no effect on 
+model predictions. The situation is not as dire as it may look. Even Turbidity 
+barely remains in the model.
+
+## Simplified Models
+To  explore the implications, we  remove smooth terms with zero or near zero
+effective degrees of freedom and refit.  That includes `combined_density`,
+Chlorophyll, and Temperature.
+### Model 2
+```{r}
+fish_gam_2 <- gam(log1p(Fish) ~ Station + 
+                     Season +
+                     is_sp_up +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts', k = 5) +
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(Yearf, bs = 're'),
+                   data = base_data, family = 'gaussian')
+summary(fish_gam_2)
+```
+
+That model fits the data slightly less well (r squared goes from 0.273 to 
+0.268), but the effect is small.
+
+```{r}
+concurvity(fish_gam_2)
+```
+
+We still have concurvity issues, especially for Salinity and Discharge.  We can look more closely at where the concurvity issues are greatest.
+
+```{r}
+round(concurvity(fish_gam_2, full = FALSE)$observed,3)
+```
+
+Salinity and discharge are moderately related (negatively correlated), as one 
+might expect.  Discharge is also fairly closely related to the year. Turbidity 
+and Discharge might be a problem as well.
+
+## Preliminary conclusion
+The Full model is probably slightly influenced by concurvity, but not strongly
+so because several of the predictors that are stronlgy co linear were
+effectively "shrunk" out of the model.
+
+But that leaves an open question.  De we have scientific reasons to prefer to
+keep different terms in the model than the ones selected mechanically by the 
+shrinkage estimators?
+
+## Even Simpler Models
+We can take this one step further, and drop another term from the model. The
+choice of what to drop at this point is not obvious.  We could drop Discharge,
+because it has high concurvidtiy with several other predictors, or we could drop 
+Turbidity, because it appears to be of little value predicting fish abundance.
+I chose to drop the turbidity term.  While we are at it, I drop the 
+(consistently unimportant) `is_sp_up` term.
+
+### Model 3
+```{r}
+fish_gam_3 <- gam(log1p(Fish) ~ Station + 
+                     Season +
+                     #is_sp_up +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts', k = 5) +
+                     s(Yearf, bs = 're'),
+                   data = base_data, family = 'gaussian')
+summary(fish_gam_3)
+```
+```{r}
+anova(fish_gam_3)
+```
+
+Note that Station is not statistically significant by ANOVA, but was by Wald 
+test.  
+
+
+```{r}
+concurvity(fish_gam_3)
+```
+This still shows concurvity issues. Salinity, Discharge and Year are all 
+correlated.  Perhaps we should consider why we want to fit both discharge and 
+salinity values at all.
+
+## One Step Too many...
+Interestingly, dropping Station from the model has some unpleasant 
+effects:
+
+```{r}
+fish_gam_4 <- gam(log1p(Fish) ~ #Station + 
+                     Season +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts') +
+                     s(Yearf, bs = 're') ,
+                   data = base_data, family = 'gaussian')
+summary(fish_gam_4)
+```
+
+Note that dropping the "not significant' `Station` factor changes our
+interpretation of the relationship with salinity, and removes the statistical
+significance of the Year random effect.
+
+I interpret this as a case on Simpson's paradox. If you don't know where you are
+in the Estuary, Salinity is not a very helpful predictor. IF you DO know which 
+Station you are at, however, higher salinity is associated with higher
+plankton density.
+
+This  suggests a model looking at how effects of salinity vary by
+station could be interesting.
+
+```{r}
+fish_gam_5 <- gam(log1p(Fish) ~ Station +
+                     Season +
+                     s(Sal, by = Station, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts') +
+                   s(Yearf, bs = 're'),
+                   data = base_data, family = 'gaussian')
+summary(fish_gam_5)
+```
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam_5)
+par(oldpar)
+```
+
+Salinity principally matters as a predictor of fish abundance at the upper end 
+of the estuary.
+
+# Selecting a model
+Which model should we continue with?
+
+* The full model has the advantage of simplicity - -we don't have to explain model selection procedures.
+*  Model 2 is nearly the same model (from a practical point of view).  We just 
+   removed the "least important" terms to test concurvity.
+* Model 3 is probably our best model overall, but it's not easy to explain how
+  we got there.
+* Model 4 is probably a mistake, due to Simpson's paradox.
+* Model 5 answers a side question.
+
+Luckily, the models all provide qualitatively similar conclusions:
+
+1.  Season matters.
+2.  River discharge matters.
+3.  Salinity matters, but mostly in the upper watershed, where we have a few
+    low salinity events.
+
+## Station (not significant)
+### Model 1
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(fish_gam, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+### Model 3
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(fish_gam_3, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+## Season
+### Model 1
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(fish_gam, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Model 3
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(fish_gam_3, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+## Plot GAM results
+### Model 1
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam)
+par(oldpar)
+```
+
+### Model 3
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam_3)
+par(oldpar)
+```
+
+## Model Diagnostics
+### Model 1
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(fish_gam)
+par(oldpar)
+```
+
+The model is pretty good, with only slightly skewed residuals.
+
+### Model 3
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(fish_gam_3)
+par(oldpar)
+```
+
+Model looks reasonable
+
+## Preliminary Conclusions
+Season, Discharge and Salinity are all important.  Fish densities tended to be 
+higher in the spring, and lower under high discharge conditions.  In the upper 
+estuary, lower salinity tends to be associated with lower fish abundance, even 
+when discharge is taken into account.
+
+## Formal comparison of nested models
+The models are all about equivalent.
+```{r}
+anova(fish_gam, fish_gam_2, fish_gam_3, fish_gam_4, fish_gam_5, test = "Chisq")
+```
+
+Comparison of GAM fits by AIC is a bit tricky, since the smoothers can change in
+complexity when fitting slightly different models, thus changing degrees of 
+freedom in odd ways.
+
+Model 5 shows the lowest residual AIC, but it is probably not
+meaningfully different from Model 3 or Model 4. Even differences with the other
+two models are not great.  These models all perform about the same by AIC.
+
+```{r}
+AIC(fish_gam, fish_gam_2, fish_gam_3, fish_gam_4, fish_gam_5)
+```
+
+# Total Zooplankton Density
+##  Full Model
+### Model 1
+```{r}
+density_gam <- gam(log(combined_density) ~ 
+                          Station + 
+                          Season +
+                          is_sp_up +
+                          s(Temp, bs="ts", k = 5) +
+                          s(Sal, bs="ts", k = 5) + 
+                          s(disch_wk, bs = 'ts', k = 5) +
+                          s(log(Turb), bs="ts", k = 5) + 
+                          s(log(Chl), bs="ts", k = 5) + 
+                          s(log1p(Fish),bs="ts", k = 5) +
+                          s(Yearf, bs = 're'),
+                         data = complete_data, family = 'gaussian')
+summary(density_gam)
+```
+
+The full model has an adjusted R square of 0.76, which is pretty good for
+complex statistical models in ecology.
+
+```{r}
+anova(density_gam)
+```
+
+Almost everything tests as statistically significant here (except Season and 
+Fish). Station and Temperature are marginally significant.
+
+```{r}
+concurvity(density_gam)
+```
+We see problems with colinearity, especially for Temperature, Salinity and 
+Discharge.
+
+## Simplified Models
+We drop the Fish Density predictor, as it was effectively "shrunk" out of the
+model.
+
+### Model 2
+```{r}
+density_gam_2 <- gam(log(combined_density) ~ 
+                          Station + 
+                          Season +
+                          is_sp_up +
+                          s(Temp, bs="ts", k = 5) +
+                          s(Sal, bs="ts", k = 5) + 
+                          s(disch_wk, bs = 'ts', k = 5) +
+                          s(log(Turb), bs="ts", k = 5) + 
+                          s(log(Chl), bs="ts", k = 5) + 
+                          #s(log1p(Fish),bs="ts", k = 5) +
+                          s(Yearf, bs = 're'),
+                         data = complete_data, family = 'gaussian')
+summary(density_gam_2)
+```
+
+Despite removing only the "not significant" term that was fit with nearly
+zero effective degrees of freedom, the R squared value dropped from 0.76 to
+0.69.  I'm not sure why.
+
+
+```{r}
+concurvity(density_gam_2)
+```
+
+We still have challenges with respect to colinearity / concurvity for 
+Temperature, Salinity, and discharge.  Effectively, we are not getting a good 
+estimate of the relationship between any of these variables and zooplankton
+abundance, because the predictors are themselves correlated. 
+
+```{r}
+round(concurvity(density_gam_2, full = FALSE)$observed,3)
+```
+
+The Discharge - Temperature connection is the most severe.  But Discharge is 
+also linked to all other predictors.  Temperature and Chlorophyll are also
+closely linked.
+
+### Model 3
+We probably need to at least look at a model that omits the Discharge metric.
+```{r}
+density_gam_3 <- gam(log(combined_density) ~ 
+                          Station + 
+                          Season +
+                          is_sp_up +
+                          s(Temp, bs="ts", k = 5) +
+                          s(Sal, bs="ts", k = 5) + 
+                          #s(disch_wk, bs = 'ts', k = 5) +
+                          s(log(Turb), bs="ts", k = 5) + 
+                          s(log(Chl), bs="ts", k = 5) + 
+                          s(Yearf, bs = 're'),
+                         data = complete_data, family = 'gaussian')
+summary(density_gam_3)
+```
+
+R squared continues to drop....
+
+```{r}
+anova(density_gam_3)
+```
+
+
+The primary change is to make Turbidity no longer statistically significant and
+make temperature only marginally significant, but both terms still have
+effective degrees of freedom well above zero.  This kind of confusing behavior
+is likely  direct result of including so many colinear terms in the model. 
+
+```{r}
+concurvity(density_gam_3)
+```
+
+Both Temperature and Salinity are  problematic.
+
+```{r}
+round(concurvity(density_gam_3, full = FALSE)$observed,3)
+```
+
+Temperature is linked to Chlorophyll.  Salinity is connected to both turbidity
+and chlorophyll.  We can not independently determine the importance of these 
+different, correlated predictors with any certainty.  
+
+## Selecting a Model
+
+Our simpler models simply are not quite as good at predicting zooplankton
+abundance.  But the full model has problems with colinearity, so we are on
+shaky ground interpreting model parameters.
+
+```{r}
+anova(density_gam, density_gam_2, density_gam_3, test = 'Chisq')
+```
+
+Model 1 is marginally better than model 2 (by deviance and likelihood), and both
+are better than model 3, which dropped th river discharge predictor.
+
+```{r}
+AIC(density_gam, density_gam_2, density_gam_3)
+```
+
+By AIC, there is little difference between model 1 and model 2, but both
+are significantly better than the model 3, which omits river discharge.
+
+I'm not sure where to go next.  In general, colinearity means the coefficients
+and p values associated with each "colinear" parameter may depend on what other
+terms are in the model. I believe "concurvidity" is similar, but since we are
+fitting potentially non-linear relationships, the **shape** of the relationships
+could also depend on what other terms are in the model.  On teh other hand, the
+colinearity / concurvity should not alter predictions or proportion of variance
+explained by the model.
+
+## Model 1 (Full Model) Review
+### Station and Season
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(density_gam, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(density_gam, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+And Spring has significantly higher Zooplankton density than summer or fall.
+
+### Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(density_gam)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(density_gam)
+par(oldpar)
+```
+So, nothing much has changed. THe model has one major outlier -- presumably one 
+of those spring "washout" samples. That is problematic.
+
+## Model 2 Review
+### Station and Season
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(density_gam_2, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+Pairwise comparisons among stations are not significant, although the comparison
+between Station 1 and station 4 is marginally. The station 1 - station 4 
+comparison DOES turn up as significant in a few closely related models.  That is 
+probably an unwelcome consequence of the high colinearity in the model.
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(density_gam_2, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+And Spring has significantly higher Zooplankton density than summer or fall.
+
+### Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(density_gam_2)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(density_gam_2)
+par(oldpar)
+```
+So, nothing much has changed. The model still has one major outlier.  The 
+residuals are perhaps slightly more skewed.  We should not take p values too 
+seriously.
+
+# Shannon Diversity
+## Full Model
+### Model 1
+```{r}
+shannon_gam_a <- gam(H ~ Station + 
+                     Season +
+                     is_sp_up +
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts', k = 5) +
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(Fish),bs="ts", k = 5) +
+                   s(Yearf, bs = 're') ,
+                   data = complete_data, family = 'gaussian')
+summary(shannon_gam_a)
+```
+```{r}
+shannon_gam_b <- gam(H ~ Station + 
+                     Season +
+                     #is_sp_up +
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts', k = 5) +
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(Fish),bs="ts", k = 5) +
+                   s(Yearf, bs = 're') ,
+                   data = complete_data, family = 'gaussian')
+summary(shannon_gam_b)
+```
+
+```{r}
+anova(shannon_gam_b)
+```
+
+Note that omitting `is_sp_up` **improved** model r squared values. That
+is weird. ordinarily in a linear model, if you remove a predictor, r squared
+goes down.  But here the GAM fitting algorithm for the simpler  combo works 
+better. Weird.
+
+```{r}
+anova(shannon_gam_a, shannon_gam_b, test = 'Chisq')
+```
+
+The "simpler" model  also highlights river discharge as an important predictor,
+which was otherwise masked by `is_sp_up`. Colinearity and concurvidity really 
+affect this model up.
+
+We continue to develop the second version of this model.
+
+```{r}
+concurvity(shannon_gam_b)
+```
+
+Temperature and Discharge have high concurvity scores over all.  Salinity is 
+also possibly problematic.
+
+
+## Reduced Complexity Models
+### Model 2
+
+After much experimentation, I end up concluding that colinearity here is a major 
+problem.  I'll demonstrate by dropping two of the high colinearity predictors
+from the model.  Temperature and fish were effectively "shrunk" out of Model
+1 (`shannon_gam_b`), so we try a model that omits Fish only (still omitting 
+`is_sp_up`).  We'll try dropping Temp in a moment.
+
+```{r}
+shannon_gam_2<- gam(H ~ Station + 
+                     Season +
+                     s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts', k = 5) +
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     #s(log1p(Fish),bs="ts", k = 5) +
+                   s(Yearf, bs = 're') ,
+                   data = complete_data, family = 'gaussian')
+summary(shannon_gam_2)
+```
+
+Note that Salinity is no longer an important predictor, and is, in fact, shrunk
+out of the model, with tiny effective degrees of freedom. Now temperature,
+discharge, and chlorophyll are significant. Removing the fish term caused major
+changes in which other terms are "shrunk" out of the model and which are judged
+to be statistically significant.  That is a classic sign of colinearity
+problems...
+
+```{r}
+concurvity(shannon_gam_2)
+```
+
+Model 2 improves R squared, but it still has significant colinearity problems,
+especially with temperature, salinity, and discharge.
+
+### Model 3
+If we drop "Temp" only, we come to a different set of conclusions.
+```{r}
+shannon_gam_3<- gam(H ~ Station + 
+                     Season +
+                     #s(Temp, bs="ts", k = 5) +
+                     s(Sal, bs="ts", k = 5) + 
+                     s(disch_wk, bs = 'ts', k = 5) +
+                     s(log(Turb), bs="ts", k = 5) + 
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(log1p(Fish),bs="ts", k = 5) +
+                   s(Yearf, bs = 're') ,
+                   data = complete_data, family = 'gaussian')
+summary(shannon_gam_3)
+```
+
+Here, Salinity and Discharge are considered significant, but not the other 
+predictors. We removed one "not significant" term that was "shrunk" out of the
+model, and it decreased R squared fairly substantially.
+
+Discharge and to a lesser extent, Salinity still show a fair amount of 
+concurvity.  We **still**  can't unambiguously interpret the model parameters.
+
+```{r}
+concurvity(shannon_gam_3)
+```
+
+It looks like discharge is the biggest culprit here.
+
+```{r}
+round(concurvity(shannon_gam_3, full = FALSE)$observed,3)
+```
+
+##Selecting a Model
+Model 2 is a significantly worse model than the Model 1. Weirdly, Model 2
+matches the first model exactly for R squared, degrees of freedom and deviance.
+Because of colinearity,  I don't know how to interpret the model coefficients.
+
+```{r}
+anova(shannon_gam_b, shannon_gam_2, shannon_gam_3, test = 'Chisq')
+```
+
+```{r}
+AIC(shannon_gam, shannon_gam_2, shannon_gam_3)
+```
+
+If we go on to drop both Temperature and the Fish predictor, R squared drops 
+fairly substantially (not shown), and again changes the set of nominally 
+significant predictors.
+
+Including Discharge in the models appears to strongly influence interpretation 
+of the rest of the model.
+
+### Model 1 Review
+Note that neither 
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(shannon_gam_b, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(shannon_gam_b, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+## Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam_2)
+par(oldpar)
+```
+
+Again, not much changes, although here the relationship with Fish is a bit 
+stronger than the relationship was with River Herring.  Still not statistically
+significant in this model.  
+
+## Diagnostic Plots
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(shannon_gam_2)
+par(oldpar)
+```
+### Model 2 Review
+
+Neither is significant (in this modle)
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(shannon_gam_2, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+Station 1 has significantly lower zooplankton diversity.
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(shannon_gam_2, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+## Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam_2)
+par(oldpar)
+```
+
+Again, not much changes, although here the relationship with Fish is a bit 
+stronger than the relationship was with River Herring.  Still not statistically
+significant in this model.  
+
+## Diagnostic Plots
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(shannon_gam_2)
+par(oldpar)
+```
+
+# Single Species Models
+The high degree of "hand" modeling needed so far to manage colinearity suggests 
+that this is not a practical data analysis approach to follow for each species.
+I have already conducted analyses omitting the Discharge predictors in another
+notebook.
+

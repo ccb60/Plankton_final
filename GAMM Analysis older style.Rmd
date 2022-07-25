@@ -1,0 +1,655 @@
+---
+title: "GAMs to Analyze Plankton Community -- Old Style, Omitting Discharge"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "6/16/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook reprises relevant analyses presented in the "Final-Gams.pdf"
+notebook, just substituting "Fish" as a predictor where previously we had looked
+at "RH, for River Herring.  Most of the code should just run "out of the box"
+based on a glopbal seach and replace.....
+
+# Load Libraries
+```{r libraries}
+library(tidyverse)
+library(readxl)
+library(mgcv)      # for GAM models
+library(emmeans)   # For extracting useful "marginal" model summaries
+```
+
+# Set Graphics Theme
+This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
+format suitable for (some) publications.
+```{r set_theme}
+theme_set(theme_classic())
+```
+
+# Input Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+```
+
+## Load Data
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+```
+
+Station names are arbitrary, and Erin previously expressed interest in renaming 
+them from Stations 2, 4, 5 and 8 to Stations 1,2,3,and 4.
+
+The `factor()` function by default sorts levels before assigning numeric codes,
+so a convenient way to replace the existing station codes with sequential
+numbers is to create a factor and extract the numeric indicator values with 
+`as.numeric()`.
+
+```{r change_station_names_2}
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+head(station_data)
+```
+
+### Subsetting to Desired Data Columns
+I base selection of predictor variables here on the ones used in the manuscript.
+
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         Fish = `___61`,
+         RH = Herring
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, DOY, riv_km, 
+         Temp, Sal, Turb, AvgTurb, DOsat, Chl, 
+         Fish, RH, 
+         combined_density,H, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+head(base_data)
+```
+
+```{r}
+rm(station_data)
+```
+
+### Add Sample Event Predictor
+
+For this analysis, we need a factor for each sample event, to be fit (or not) as
+a random factor in the GAMM models.
+
+```{r}
+base_data <- base_data %>%
+  mutate(sample_seq = as.numeric(Season) + (Year-2013)*3,
+         sample_event = factor(sample_seq))
+```
+
+# Model of Fish Abundance
+```{r}
+fish_gam <- gamm(log1p(Fish) ~ Station + 
+                     Season +
+                     s(Temp, bs="ts") +
+                     s(Sal, bs="ts") + 
+                     s(log(Turb), bs="ts") + 
+                     s(log(Chl), bs="ts") + 
+                     s(log1p(combined_density),bs="ts"),
+                   random = list(Yearf = ~ 1, sample_event = ~ 1),
+                   data = base_data, family = 'gaussian')
+anova(fish_gam$gam)
+```
+
+```{r}
+summary(fish_gam$gam)
+```
+
+Fish abundance is significantly predicted ONLY by Season, and not by any of the environmental predictors, although the Salinity smoother is nearly significant.
+
+## Station and Season (Station not significant)
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(fish_gam, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(fish_gam, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+## Plot GAM results
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(fish_gam$gam)
+par(oldpar)
+```
+
+## Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(fish_gam$gam)
+par(oldpar)
+```
+
+The model is pretty good, with only slightly skewed residuals.
+
+
+```{r}
+concurvity(fish_gam$gam)
+```
+
+## Preliminary Conclusions
+My instinct here would be to simplify this model and see if that clarifies 
+relationships any. We're carrying a lot of predictors that have low effect
+in these models, which may reduce statistical power or alter interpretation of 
+the other terms.
+
+## Reduced Complexity Model
+Nothing I've done suggests turbidity or chlorophyll are major predictors, so I
+drop them. While `gamm()` does not make it easy to evaluate the importance of
+random factors, other evidence suggests the `Sample_Event` random factor does
+not help model fit, and the theoretical justification for including it in the
+model is fairly we, so I COULD dop that drop that as well.
+```{r}
+fish_gam_2<- gamm(log1p(Fish) ~ Station +
+                     Season +
+                     s(Temp, bs="ts") +
+                     s(Sal, bs="ts") +
+                     s(log1p(combined_density),bs="ts"),
+                   random = list(Yearf = ~ 1, sample_event = ~ 1),
+                   data = base_data, family = 'gaussian')
+anova(fish_gam_2$gam)
+```
+
+```{r}
+fish_gam_3<- gam(log1p(Fish) ~ 
+                    # Station +
+                    # Season +
+                     Yearf +
+                     s(Temp, bs="ts") +
+                     s(Sal, bs="ts") +
+                     s(log1p(combined_density),bs="ts")
+                   ,
+                   data = base_data, family = 'gaussian')
+
+concurvity(fish_gam_3)
+```
+
+```{r}
+concurvity(fish_gam_3, full = FALSE)
+```
+
+
+
+
+
+# Total Zooplankton Density
+## Summary and Anova
+```{r}
+density_gam_fish <- gamm(log(combined_density) ~ 
+                          Station + 
+                          Season +
+                          s(Temp, bs="ts") +
+                          s(Sal, bs="ts") + 
+                          s(log(Turb), bs="ts") + 
+                          s(log(Chl), bs="ts") + 
+                          s(log1p(Fish),bs="ts"),
+                        random = list(Yearf = ~ 1, sample_event = ~ 1),
+                        data = base_data, family = 'gaussian')
+summary(density_gam_fish$gam)
+```
+
+## Station and Season
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(density_gam_fish, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+Station 1 has significantly higher zooplankton than other stations.
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(density_gam_fish, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+And Spring has significantly higher Zooplanton density than the fall.
+
+## Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(density_gam_fish$gam)
+par(oldpar)
+```
+
+## Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(density_gam_fish$gam)
+par(oldpar)
+```
+So, nothing much has changed. One big outlier -- presumably one of those spring 
+"washout" samples.
+
+# Shannon Diversity
+## Summary and Anova
+```{r}
+shannon_gam <- gamm(H ~ Station + 
+                     Season +
+                     s(Temp, bs="ts") +
+                     s(Sal, bs="ts") + 
+                     s(log(Turb), bs="ts") + 
+                     s(log(Chl), bs="ts") + 
+                     s(log1p(Fish),bs="ts"),
+                   random = list(Yearf = ~ 1, sample_event = ~ 1),
+                   data = base_data, family = 'gaussian')
+summary(shannon_gam$gam)
+```
+
+```{r}
+anova(shannon_gam$gam)
+```
+
+## Station and Season (Season is not significant)
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(shannon_gam, ~Station, type = 'response', 
+                    data = base_data)
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+Station 1 has significantly lower zooplankton diversity.
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(shannon_gam, ~Season, type = 'response',
+                     data = base_data)
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+## Plot the GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam$gam)
+par(oldpar)
+```
+
+Again, not much changes, although here the relationship with Fish is a bit 
+stronger than the relationship was with River Herring.  Still not statistically
+significant in this model.  
+
+## Diagnostic Plots
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(shannon_gam$gam)
+par(oldpar)
+```
+
+# Single Species Models
+## Model Choice
+Our model alternatives are similar to the choices we had for the Total Density 
+model. The problem is, we can't use any of the continuous data distributions in 
+GAMS with zero values (at least relying on the canonical link functions) because
+(log(0) = -Inf; 1/0 = Inf, 1 / 0*0 = Inf). The easiest solution is to add some 
+finite small quantity to the density data, and predict that. Here we predict
+log(Density + 1) using Gaussian models.
+
+## Automating Analysis of Separate Species
+I'm going to automate analysis of all selected species by using a "nested"
+Tibble.  This is a convenient alternative to writing a "for" loop to run
+multiple identical analyses.
+
+I create a "long" data source.
+
+```{r}
+spp_data <- base_data %>%
+  select(Yearf, Month, Season, sample_event, Station, Temp,
+          Sal, Turb, Chl, Fish, 
+          Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  pivot_longer(-c(Yearf:Fish), names_to = 'Species', values_to = 'Density')
+```
+
+Next, I create a function to run the analysis.  This function takes a data frame
+or tibble as an argument.  The tibble mush have data columns with the correct 
+names.
+
+The initial model fits for some species had a lot of wiggles in them, to an 
+extent that I thought did not make much scientific sense, so I decided to reduce
+the dimensionality of the GAM smoothers, by adding the parameter `k= 4`. Lowe
+numbers constrain the GAM to fit smoother lines.
+
+```{r}
+my_gamm <- function(.dat) {
+  
+  gamm(log1p(Density) ~ Station + 
+        Season +
+        s(Temp, bs="ts", k = 4) +
+        s(Sal, bs="ts", k = 4) + 
+        s(log(Turb), bs="ts", k = 4) + 
+        s(log(Chl), bs="ts", k = 4) + 
+        s(log1p(Fish),bs="ts", k = 4),
+      random = list(Yearf = ~ 1, sample_event = ~ 1),
+      data = .dat, family = "gaussian")
+}
+```
+
+
+Next, I create the nested tibble, and conduct the analysis on each species....
+
+```{r}
+spp_analysis <- spp_data %>%
+  group_by(Species) %>%
+  nest() %>%
+  mutate(gam_mods = map(data, my_gamm))
+```
+
+and finally, output the model results.  I can do that in a "for" loop, but it's 
+Awkward to look through a long list of output, so I step through each species in turn.
+
+\newpage
+## Acartia
+### Summary and ANOVA
+```{r}
+spp = 'Acartia'
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod$gam)
+cat('\n')
+anova(mod$gam)
+```
+
+### Comparison of Station and Season (Station not significant)
+
+
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(mod, ~Station, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(mod, ~Season, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod$gam)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod$gam)
+par(oldpar)
+```
+
+\newpage
+## Balanus
+### Summary and ANOVA
+```{r}
+spp = 'Balanus'
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod$gam)
+cat('\n')
+anova(mod$gam)
+```
+
+### Comparison of Station and Season (Season not significant)
+
+
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(mod, ~Station, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(mod, ~Season, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod$gam)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod$gam)
+par(oldpar)
+```
+
+\newpage
+##  Eurytemora
+### Summary and ANOVA
+```{r}
+spp =  "Eurytemora" 
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod$gam)
+cat('\n')
+anova(mod$gam)
+```
+
+### Comparison of Station and Season (Season marginally significant)
+
+
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(mod, ~Station, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(mod, ~Season, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod$gam)
+par(oldpar)
+```
+
+Salinity is the only smooter term that shows as significant.
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod$gam)
+par(oldpar)
+```
+
+Some outliers -- again, probably the "washout" samples.
+
+\newpage
+## Polychaete
+### Summary and ANOVA
+```{r}
+spp =  "Polychaete" 
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod$gam)
+cat('\n')
+anova(mod$gam)
+```
+
+### Comparison of Station and Season (Station not significnat)
+
+
+
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(mod, ~Station, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(mod, ~Season, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod$gam)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod$gam)
+par(oldpar)
+```
+
+\newpage
+## Pseudocal
+### Summary and ANOVA
+```{r}
+spp =  "Pseudocal"
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod$gam)
+cat('\n')
+anova(mod$gam)
+```
+
+### Comparison of Station and Season
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(mod, ~Station, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(mod, ~Season, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod$gam)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod$gam)
+par(oldpar)
+```
+
+\newpage
+## Temora
+### Summary and ANOVA
+```{r}
+spp =  "Temora"   
+mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]
+summary(mod$gam)
+cat('\n')
+anova(mod$gam)
+```
+
+### Comparison of Station and Season 9Season not significant)
+```{r fig.width = 3, fig.height = 2}
+Sta_emms <- emmeans(mod, ~Station, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Sta_emms)
+pairs(Sta_emms, adjust ='bonferroni')
+```
+
+```{r fig.width = 3, fig.height = 2}
+Seas_emms <- emmeans(mod, ~Season, type = 'response', 
+                    data = spp_analysis$data[spp_data$Species == spp][[1]])
+plot(Seas_emms)
+pairs(Seas_emms, adjust ='bonferroni')
+```
+
+### Plot GAM
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(mod$gam)
+par(oldpar)
+```
+
+### Model Diagnostics
+```{r fig.width = 5, fig.height = 5}
+oldpar <- par(mfrow = c(2,2))
+gam.check(mod$gam)
+par(oldpar)
+```
+
+

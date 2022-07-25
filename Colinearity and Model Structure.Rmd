@@ -1,0 +1,636 @@
+---
+title: "Effect of C0linearity on Mixed Effects Linear Models of Plankton Community Data"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "7/21/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook looks closely at the effect of colinearity on LMER models for 
+plankton community composition in Penobscot Bay.
+
+## Colinearities
+Correlations among predictors are fairly high, so different predictors 
+'confound' each other.  Values (and sometimes even the sign) of model parameters 
+are dependent on which other terms are retained in each model.
+
+The problem with colinearity is that the interpretation of relationships 
+between predictors and response variables can depend on which other terms are
+retained in the model.  
+
+Estuaries are full of expected correlations among environmental variables,
+driven by seasonality, river discharge, estuary mixing dynamics etc.  In Maine,
+during the warmer months of the year, river water is significantly warmer than
+ocean water, so location in the estuary (upstream vs. downstream), seasonality,
+temperature and salinity are all interrelated. Estuarine processes can further 
+generate correlations among other environmental variables.
+
+This complicates fitting of regression models in estuarine environments, as 
+environmental variables are not independent, leading to difficulties with
+model specification.
+
+## A Note on Degrees of Freedom
+We have just under 60 complete cases available, and as our models grow
+increasingly complex, we burn up degrees of freedom. The "full" linear mixed
+effects model used here has the following degrees of freedom:
+
+Source                  | Degrees of Freedom
+------------------------|---------------
+Intercept               | 1
+Year (Random)           | 1 *
+Sample Day (Random)     | 1 *
+Station                 | 3
+Season                  | 2
+is_sp_up                | 1
+Temp                    | 1
+Sal                     | 1
+log(Turb)               | 1
+log(Chl)                | 1
+log1p(Fish)             | 1
+*Total*                 | *14*
+
+Adding an interaction term between Station and Season (instead of fitting the 
+"is_sp_up" term) adds $3 \times 2 - 1 - 1 = 4$ further degrees of freedom. 
+
+The "GAM" models we tested use multiple degrees of freedom to estimate each
+non-linear fit, so we often need to restrict the dimension of the smoothers
+to avoid using up all available degrees of freedom.  The GAM models are complex
+models to fit to a fairly small data set.
+
+# Load Libraries
+```{r libraries}
+library(mgcv)
+library(lmerTest)  # Automatically loads lme4
+library(tidyverse)
+library(readxl)
+library(car)       # for vif() function
+#library(fmsb)
+library(emmeans)   # For extracting useful "marginal" model summaries
+```
+
+# Set Graphics Theme
+This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
+format suitable for (some) publications.
+```{r set_theme}
+theme_set(theme_classic())
+```
+
+# Input Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+```
+
+## Load Data
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+```
+
+```{r}
+names(station_data)[10:12]
+
+names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
+```
+
+Station names are arbitrary, and Erin expressed interest in renaming them from
+Stations 2, 4, 5 and 8 to Stations 1, 2, 3,and 4.
+
+The `factor()` function by default sorts levels before assigning numeric codes,
+so a convenient way to replace the existing station codes with sequential
+numbers is to create a factor and extract the numeric indicator values with 
+`as.numeric()`.
+
+```{r change_station_names_2}
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+head(station_data)
+```
+
+##  Scaling values
+I divide two predictor variables by 1000 to reduce numerical problems
+with model fitting.
+```{r}
+range(station_data$disch_wk)
+range(station_data$`___61`, na.rm = TRUE)
+```
+
+```{r}
+station_data <- station_data %>%
+  mutate(Fish = `___61` / 1000, 
+         disch_wk = disch_wk/1000)  %>%  # to reduce scale issues in model fit
+  select(-`___61`)
+```
+
+```{r}
+range(station_data$disch_wk)
+range(station_data$Fish, na.rm = TRUE)
+```
+
+## Subsetting to Desired Data Columns
+I base selection of predictor variables here on the ones used in the manuscript,
+plus River Discharge. The three Discharge estimators are highly correlated.  I 
+selected the weekly discharge figure because I felt it probably reflected recent
+conditions better than a daily discharge value, but honestly, it makes little
+difference.
+
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         is_sp_up = season == 'Spring' & Station == 1,
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         RH = Herring
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, is_sp_up, DOY, riv_km, 
+         disch_wk, disch_day, disch_max,
+         Temp, Sal, Turb, AvgTurb, DOsat, Chl, 
+         Fish, RH, 
+         combined_density, H, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+head(base_data)
+```
+
+```{r}
+rm(station_data)
+```
+
+## Complete Cases
+This drops two samples, one with missing Zooplankton data (leading to our normal
+sample size of 59 samples), and one for missing fish data.  We need this reduced
+data set to compare sequential models where we want to evaluate the importance
+of either fish or zooplankton as predictors (at least if we want to use model
+comparisons via AIC or likelihood).
+
+```{r}
+complete_data <- base_data %>%
+  select(Season, Station, Yearf, disch_wk,
+         is_sp_up, Temp, Sal, Turb, Chl, DOsat, Fish, RH,
+         combined_density, H, 
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  filter(complete.cases(.))
+```
+
+## Drop Low Salinity Observations
+The low salinity spring samples are doing something rather different, and they
+complicate model fitting. Models are far better behaved if we exclude a few
+extreme samples.  These are low salinity low zooplankton samples.  We have two 
+complementary ways to specify which samples to omit, without just omitting
+"outliers". The first is to restrict modeling to "marine" samples over a certain salinity, and the other is to omit spring upstream samples, which include most
+of the problematic samples.
+
+```{r}
+drop_low <- complete_data %>%
+  filter(Sal > 10)    # Pulls three samples, including one fall upstream sample
+drop_v_low <- complete_data %>%
+  filter(Sal > 5)     # drops two Samples, both spring Samples
+drop_sp_up <- complete_data %>%
+  filter(! is_sp_up)  # drops four samples
+```
+
+# Correlations Among Predictors
+Pairwise comparisons are a good place to start.  To make it marginally easier
+to look at Season and Station via `cor()`, I convert them to numeric values.  
+This means the correlations are only linear associations, and don't reflect any
+non-linearities (which we actually know exist).  But it's a good first step.
+
+The following uses Spearman Rank correlations, to minimize the potential effect
+of different monotonic transformations of predictors on the reported 
+correlations.
+
+## The Complete Data
+```{r}
+complete_data %>%
+  select(Season, Station, c(disch_wk:Fish),  -is_sp_up) %>%
+  mutate(Season = as.numeric(Season), 
+         Station = as.numeric(Station)) %>%
+  cor(method = 'spearman', use = 'pairwise') %>%
+  round(3)
+```
+*  Season is associated with Discharge, Temperature, Salinity, Chlorophyll  and
+   dissolved oxygen saturation.
+   
+*  Station is also moderately correlated with Salinity,  Turbidity and
+   chlorophyll
+
+*  Discharge is highly correlated (in absolute value) with multiple possible
+   predictor variables, especially Season, temperature, and Chlorophyll and
+   dissolved oxygen.
+   
+*  Dissolved oxygen is correlated with many predictors at intermediate values.
+
+
+## Reduced Data
+### Drop Low Salinity Samples
+While dropping extreme samples (drop three low salinity samples)
+```{r}
+drop_low %>%
+  select(Season, Station, c(disch_wk:Fish),  -is_sp_up) %>%
+  mutate(Season = as.numeric(Season), 
+         Station = as.numeric(Station)) %>%
+  cor(use = 'pairwise') %>%
+  round(3)
+```
+
+*  Discharge is still highly correlated with Season and Temperature.  The
+   correlation with salinity is somewhat reduced.
+  
+*  Season is still highly correlated with temperature, but the connection with 
+   salinity is slightly reduced.
+
+*  Station is still moderately correlated with Temperature, Salinity, and 
+   turbidity.
+   
+### Drop all upstream spring samples
+```{r}
+drop_sp_up%>%
+  select(Season, Station, c(disch_wk:Fish), -is_sp_up) %>%
+  mutate(Season = as.numeric(Season), 
+         Station = as.numeric(Station)) %>%
+  cor(use = 'pairwise') %>%
+  round(3)
+```
+
+That is more or less the same as our prior data subsets.
+
+# PCA of Predictors 
+One way to look at correlations among variables is to look at a principal
+components analysis of explanatory variables. Variables that have a high loading
+on important PCA axes are highly colinear with the other variables included in 
+the PCA. 
+
+The problem in using a PCA this way is that results depend somewhat on how each
+predictor will be transformed in the eventual models. We transform the 
+predictors the way we have been including them in models, based on prior work.
+
+The PCA based on the covariance matrix (equivalent to not scaling variables 
+before conducting the PCA) is dominated by discharge, which alone accounts for
+high proportion of overall pattern. 
+
+High discharge samples are associated with high discharge spring events in
+2013 and 2017. Quickly perusing the data shows that they are cooler temperature,
+slightly low salinity,  high dissolved oxygen samples. That impression is 
+confirmed by the PCA. 
+
+```{r fig.width = 6, fig.height = 6}
+test <- complete_data %>%
+  mutate(Turb = log(Turb),
+         Chl = log(Chl),
+         Fish = log1p(Fish)) %>%
+  select(c(disch_wk:Fish ), - is_sp_up)  %>%
+  prcomp(scale. = FALSE)
+biplot(test)
+```
+
+```{r}
+summary(test)
+```
+
+```{r}
+test$rotation
+```
+
+Axis 1, which accounts for just over 3/4 of the variance, is nearly synonymous
+with discharge. 
+
+Axis 2 is "mostly" dissolved oxygen,  but it explains much less
+of the structure in the data, and we are missing dissolved oxygen data from 
+2013.
+
+Axis 3 is associated with salinity, and explains nearly as much of the structure
+among predictors as dissolved oxygen.
+
+Cumulatively, we've got about 89% of the variance (information) in the
+correlation matrix explained by the first two PCA axes, and 99% explained by the
+first three.  But most of the structure is in Axis 1, suggesting any model that
+includes Discharge is going to be problematic.
+
+## In the absence of Discharge
+```{r fig.width = 6, fig.height = 6}
+test <- complete_data %>%
+  mutate(Turb = log(Turb),
+         Chl = log(Chl),
+         Fish = log1p(Fish)) %>%
+  select(c(Temp:Fish), -is_sp_up)  %>%
+  prcomp(scale. = FALSE)
+biplot(test)
+```
+
+```{r}
+summary(test)
+```
+So Axis 1 now explains only 58% of the structure in the predictor variables.  We
+are likely to have fewer problems with colinearity if we omit Discharge from
+our models.
+
+```{r}
+test$rotation
+```
+
+## Drop DO Saturation
+```{r fig.width = 6, fig.height = 6}
+test <- complete_data %>%
+  mutate(Turb = log(Turb),
+         Chl = log(Chl),
+         Fish = log1p(Fish)) %>%
+  select(c(Temp:Fish), -is_sp_up, -DOsat)  %>%
+  prcomp(scale. = FALSE)
+biplot(test)
+```
+
+```{r}
+summary(test)
+```
+Axis 1 explains 69%% of the structure in the predictor variables, but pretty
+much all of the structure in the predictors is explained by axis 1, with high
+loading on Salinity, and axis 2, with high loading on Temperature.
+
+```{r}
+test$rotation
+```
+
+## Conclusions
+*  The large loading of Discharge on the first PCA axis tells us that it is
+   close to colinear with some linear combination of the other predictors.  Any
+   model including Discharge is going to have problems with colinearity.
+
+*  The moderate loading on dissolved oxygen on Axis 2 is less problematic, but
+   we lack dissolved oxygen data for 2013, so we chose to omit DO from our
+   models as well.
+   
+*  This analysis does not address strong statistical associations between our
+   experimental factors, Season and Station, and the measured environmental
+   variables.  
+   *  Season tends to be associated fairly strongly with temperature, as 
+      water temperatures are lower across the board in spring (especially in the
+      upper estuary).  
+   *  Station tends to be associated with salinity, with lower salinity in the 
+      upper watershed, especially in spring.
+
+*  We are likely to have trouble interpreting model coefficients for models that
+   include both Season and Temperature or both Station and Salinity.
+
+# LMER Models of Zooplankton Density
+We focus on linear models instead of GAMS because we can use standard methods
+to evaluate the importance of colinearity. The only random factor we include in 
+these models is Year.  much of this modelling could be managed as linear 
+models with only limited loss of information.
+
+## Full Model
+We start with a "full" model and demonstrate the problem of colinearity that 
+arises.
+
+```{r}
+density_lmer <- lmer(log1p(combined_density) ~ 
+                     Station + Season + 
+                      Temp +
+                      Sal + 
+                      disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(Fish) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(density_lmer)
+```
+We  have many problems with colinearity, especially with Temperature, salinity,
+discharge, Season and possibly Station
+
+
+## Reduced Model
+First I drop discharge.
+```{r}
+density_lmer <- lmer(log1p(combined_density) ~ 
+                     Station + Season + 
+                      Temp +
+                      Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(Fish) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(density_lmer)
+```
+
+We see Season, Temperature and perhaps Station continue to be problems.
+
+## Final Model
+We drop Season from the model next.
+
+```{r}
+density_lmer <- lmer(log1p(combined_density) ~ 
+                     Station + 
+                      #Season + 
+                      Temp +
+                      Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(Fish) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(density_lmer)
+```
+No remaining terms have especially high VIF (when appropriately scaled to 
+degrees of freedom), so we can  stop here.
+
+## Alternative Model Family
+We could go the other direction, and instead of dropping Season, we could retain
+it and drop highly correlated predictor variables, especially temperature. 
+Salinity is some what correlated with Station, so dropping it also assists with model colinearity problems.
+
+```{r}
+density_lmer_alt <- lmer(log1p(combined_density) ~ 
+                     Station + 
+                     Season + 
+                     # Temp +
+                     #Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(Fish) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(density_lmer_alt)
+```
+
+
+## Conclusions
+In effect, what this shows is that we can **either** talk in terms of season and
+Station, or in terms of salinity and temperature, but that if we try to do both
+at once, we are going to have problems with colinearity, making model
+interpretation messy.
+
+# LMER Models of Fish Abundance
+## Full model
+```{r}
+fish_lmer <- lmer(log1p(Fish) ~ 
+                     Station + 
+                     Season + 
+                      Temp +
+                      Sal + 
+                      disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(combined_density) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(fish_lmer)
+```
+
+We have many problems with colinearity here, as expected.
+
+## Reduced Model
+First lets drop discharge.  Note that i this fit, `Yearf` has so little effect
+on the model that the `lmer()` algorithm judges it to have zero variance. 
+In other words, the random structure of the model provides no benefit.
+
+```{r}
+fish_lmer <- lmer(log1p(Fish) ~ 
+                     Station + Season + 
+                      Temp +
+                      Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(combined_density) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(fish_lmer)
+```
+
+We see Season, temperature continue to problems, just as for the zooplankton 
+models.
+
+## Final Model
+We drop Season next.
+
+```{r}
+fish_lmer <- lmer(log1p(Fish) ~ 
+                     Station +
+                     #Season + 
+                      Temp +
+                      Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(combined_density) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(fish_lmer)
+```
+We again see that no remaining terms have especially high VIF, so we can stop 
+here.
+
+## Alternative Model Family
+```{r}
+fish_lmer <- lmer(log1p(Fish) ~ 
+                     Station + 
+                     Season + 
+                      #Temp +
+                      Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(combined_density) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, REML = FALSE)
+vif(fish_lmer)
+```
+
+So, dropping Discharge and Temperature  (NOT salinity this time) produces
+a model with limited problems due to colinearity. Things do get slightly better (from a VIF perspective) if you drop Salinity from the model as well.
+
+# Models on Reduced Data
+Even if we fit models to the reduced data, we find colinearities are still
+fairly high, so we still need to  drop both Discharge and Season to ensure
+decent VIF.
+
+```{r}
+density_lmer_drop <- lmer(log1p(combined_density) ~ 
+                     Station + Season + 
+                      Temp +
+                      Sal + 
+                      disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(Fish) + 
+                     (1 | Yearf),
+                   data = drop_low, na.action = na.omit, REML = FALSE)
+vif(density_lmer_drop)
+```
+
+```{r}
+density_lmer_drop <- lmer(log1p(combined_density) ~ 
+                     Station + 
+                      #Season + 
+                      Temp +
+                      Sal + 
+                      #disch_wk +
+                      log(Turb) + 
+                      log(Chl) + 
+                      log1p(Fish) + 
+                     (1 | Yearf),
+                   data = drop_low, na.action = na.omit, REML = FALSE)
+vif(density_lmer_drop)
+```
+
+# Conclusions
+
+Our "Standard" models will exclude discharge, and take two forms:
+
+1.  **Season and Station Models**  include Season and Station, but omit
+    Temperature and Salinity.
+
+2.  **Environment Models** that omit Season, but include Temperature and 
+    Salinity. They will include Station where it does not pose high colinearity
+    or concurvity problems, but omit Station if it does.
+
+
