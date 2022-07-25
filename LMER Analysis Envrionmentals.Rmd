@@ -1,0 +1,777 @@
+---
+title: "Mixed Effects Linear Models to Analyze Plankton Comunity Data"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "7/21/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook reprises analyses using mixed model linear models instead of GAMs.  The goal is to lower complexity of models, and gain access to some tools for automated model selection.  
+
+In practice, what I found using GAM analyses was that they seldom fit
+relationships that were not linear between predictors and response, so we gained
+little benefit from the added complexity of using GAM models. GAMs are complex
+to fit, especially (as here) when predictor variables are interrelated.
+
+In this Notebook, I emphasize physical environmental variables.  The base model includes teh following Fixed Effects predictors:
+
+* Station  
+* Temperature  
+* Salinity  
+* log(Turb)  
+* log(Chl)  
+* log1p(Fish)  
+
+Year is included in the model as a random effect, largely to reduce
+unexplained variance in the model.
+
+This means these models omit:
+
+*  Discharge (highly colinear with other predictors),  
+*  Oxygen Saturation (Incomplete data and Highly colinear with Temperature),  
+*  Season (Highly correlated with multiple predictors, especially Temperature)
+*  Sample Event (inclusion as a random factor often led to overspecified models
+     and it seldom proved important)
+
+I emphasize hierarchical linear models here because there are robust automated 
+tools for stepwise model selection on linear hierarchical models, and the 
+logic of applying consideration of colinearity is less confusing than the logic
+of applying "concurvity" to GAM models.  Almost all GAM models we fit to the 
+plankton data end up fitting only linear relationships anyway, so there should 
+be little loss in model accuracy. 
+
+# Load Libraries
+```{r libraries}
+library(lmerTest)  # Automatically loads lme4
+library(tidyverse)
+library(readxl)
+library(car)
+library(emmeans)   # For extracting useful "marginal" model summaries
+```
+
+# Set Graphics Theme
+This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
+format suitable for (some) publications.
+```{r set_theme}
+theme_set(theme_classic())
+```
+
+# Input Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+```
+
+## Load Data
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+```
+```{r}
+names(station_data)[10:12]
+```
+
+
+```{r}
+names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
+```
+
+
+Station names are arbitrary, and Erin previously expressed interest in renaming 
+them from Stations 2, 4, 5 and 8 to Stations 1,2,3,and 4.
+
+The `factor()` function by default sorts levels before assigning numeric codes,
+so a convenient way to replace the existing station codes with sequential
+numbers is to create a factor and extract the numeric indicator values with 
+`as.numeric()`.
+
+```{r change_station_names_2}
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+head(station_data)
+```
+
+### Subsetting to Desired Data Columns
+I base selection of predictor variables here on the ones used in the manuscript.
+
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         is_sp_up = season == 'Spring' & Station == 1,
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Density = combined_density,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         Fish = `___61`,
+         RH = Herring
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, is_sp_up, DOY, riv_km, 
+         disch_wk, disch_day, disch_max,
+         Temp, Sal, Turb, AvgTurb, DOsat, Chl, 
+         Fish, RH, 
+         Density, H, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+head(base_data)
+```
+
+```{r}
+rm(station_data)
+```
+
+## Complete Cases
+This drops only two samples, one for missing Zooplankton data, one for missing
+fish data.  We need this reduced data set to run The `step()` function. It
+makes little sense to try stepwise model selection if each time you add or 
+remove a variable, the sample you are studying changes.  Since fish is never an
+important predictor, we will want need to refit models after stepwise elimination
+to use the most complete possible data set.
+
+```{r}
+complete_data <- base_data %>%
+  select(Season, Station, Yearf,
+         is_sp_up, Temp, Sal, Turb, Chl, Fish, RH,
+         Density, H, 
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  filter(complete.cases(.))
+```
+
+## Reduced Data
+The low salinity spring samples are doing something rather different, and they
+complicate model fitting. Models are far better behaved if we exclude a few
+extreme samples.  These are low salinity low zooplankton samples.  We have two 
+complementary ways to specify which samples to omit, without just omitting
+"outliers". The first is to restrict modeling to "marine" samples over a certain salinity, and the other is to omit spring upstream samples, which include most
+of the problematic samples.
+
+```{r}
+drop_low <- complete_data %>%
+  filter(Sal > 10)    # Pulls three samples, including one fall upstream sample
+                      # a fourth low salinity sample lacks zooplankton data
+#drop_sp_up <- complete_data %>%
+#  filter(! is_sp_up)  # drops four samples
+```
+
+# Model of Fish Abundance
+```{r}
+fish_lmer <- lmer(log1p(Fish) ~ Station +
+                     Temp +
+                     Sal + 
+                     log(Turb) + 
+                     log(Chl) + 
+                     log1p(Density) + 
+                     (1 | Yearf),
+                   data = base_data, na.action = na.omit, 
+                  REML = TRUE)
+summary(fish_lmer)
+```
+
+Note that the impact of the Year random factor is so small that `lmer()` fit it 
+as having exactly zero variance.  But the term is still in the model, and 
+the model includes adjustments for annual means. That still helps reduce model
+variance.  In effect, the model is the equivalent of a linear model that 
+includes Yearf as a factor.
+
+```{r}
+anova(fish_lmer)
+```
+
+## Stepwise Model Selection
+The `lmerTest` package includes a backward elimination algorithm that first
+searches for random effects that provide little explanatory power (by likelihood
+ratio test), then for fixed effects that can be dropped.
+
+```{r}
+(fish_step_0 <- step(fish_lmer, 
+                   #reduce.random = FALSE,  # add to not drop random terms
+                   ))
+fish_step_0 <- get_model(fish_step_0)
+```
+
+Stepwise elimination takes us to a model that lacks **any** predictors.
+In essence, the best prediction we can come up with for the abundance of fish
+based on AIC is.... The mean abundance of fish.
+
+Fish abundance is associated with zooplankton density, with higher fish
+abundance occurring with higher plankton density, but the association
+hovers at the edge of statistical significance, depending on the details of the
+model.
+
+## Model Diagnostics (Full Model)
+```{r fig.width = 3, fig.height = 3}
+oldpar <- par(mfrow = c(2,2))
+plot(fish_lmer, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(fish_lmer, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(fish_lmer, hatvalues(.) ~ fitted(.))
+as_tibble(resid(fish_lmer)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+par(oldpar)
+```
+
+The Regression model has one high leverage point.  As we have come to expect,
+that is a high discharge, low salinity spring sample.
+
+```{r}
+complete_data[which(hatvalues(fish_lmer)>.5),]
+```
+
+The impact of the high leverage term is obvioous in a graphic.
+
+## Graphic Review of Data
+There is a lot of noise in this relationship.
+```{r fig.width = 5, fig.height = 3}
+base_data %>%
+  ggplot(aes(log1p(Density), log1p(Fish))) +
+  geom_point(aes(color = Station), size = 2) +
+  geom_smooth(method = 'lm', formula = y~x) +
+  facet_wrap(~Season)
+```
+
+## Model on Reduced Data
+```{r}
+fish_lmer_no_low <- lmer(log1p(Fish) ~ Station +
+                     Temp +
+                     Sal + 
+                     log(Turb) + 
+                     log(Chl) + 
+                     log1p(Density) + 
+                     (1 | Yearf),
+                   data = drop_low, na.action = na.omit, REML = FALSE)
+summary(fish_lmer_no_low)
+```
+And the resulting model shows no signs of a statistically significant 
+connection to any predictors.
+
+## Stepwise Evaluation of Submodels
+```{r}
+(fish_step_1 <- step(fish_lmer_no_low, 
+                   #reduce.random = FALSE,  # add to not drop random terms
+                   ))
+fish_step_1 <- get_model(fish_step_1)
+```
+
+Again, the final model includes no significant association between any of the
+predictors and fish abundance.
+
+# Model of Zooplankton Density
+```{r}
+density_lmer <- lmer(log(Density) ~ 
+                          Station +  
+                          Temp +
+                          Sal + 
+                          log(Turb) + 
+                          log(Chl) + 
+                          log1p(Fish) +
+                          (1 | Yearf),
+                        data = complete_data, na.action = na.omit)
+anova(density_lmer)
+```
+
+Salinity and Turbidity  are significant predictors.
+
+## Stepwise Model Selection
+```{r}
+(density_step_0 <- step(density_lmer, 
+                      #reduce.random = FALSE,  # add to not drop random terms
+                   ))
+density_step_0 <- get_model(density_step_0)
+```
+
+So, the stepwise process retains Year, salinity and turbidity as predictors of
+zooplankton density.
+
+## Model Diagnostics (Full Model)
+```{r fig.width = 3, fig.height = 2}
+plot(density_lmer, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(density_lmer, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(density_lmer, hatvalues(.) ~ fitted(.))
+as_tibble(resid(density_lmer)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+This time we have no very high leverage points, although some are on the high
+side  for a model with this many parameters.  But we have one obvious outlier,
+from 2014.
+
+```{r}
+outlier <- which(resid(density_lmer) < -3)
+complete_data[outlier,]
+```
+
+The outlier is a spring, low salinity sample from Station 1.
+
+## Graphic Review of Data
+```{r fig.width = 5, fig.height = 3}
+base_data %>%
+  ggplot(aes(Sal, log1p(Density))) +
+  geom_point(aes(color = Station), size = 2) +
+  geom_smooth(method = 'lm', formula = y~x) +
+  facet_wrap(~Season)
+```
+
+## Model on Reduced Data
+```{r}
+density_lmer_no_low <- lmer(log(Density) ~ 
+                          Station +  
+                          Temp +
+                          Sal + 
+                          log(Turb) + 
+                          log(Chl) + 
+                          log1p(Fish) +
+                          (1 | Yearf),
+                        data = drop_low, na.action = na.omit)
+anova(density_lmer_no_low)
+```
+
+This model produces slightly different results from the full data.  In the absence
+of the handful of low salinity samples, salinity no longer provides much 
+information about plankton density.  Instead, both Turbidity and Chlorophyll 
+appear important.
+
+## Stepwise Model Selection
+Stepwise model selection confirms that conclusion.
+```{r}
+(density_step_no_low <- step(density_lmer_no_low))
+density_step_no_low <- get_model(density_step_no_low)
+```
+
+## Graphic Summaries
+### Compare Stations
+#### Data (dropping low salinity samples)
+```{r fig.width = 5, fig.height = 3}
+drop_low %>%
+  ggplot(aes(Station, log1p(Density))) +
+  stat_summary(size = 1, color = 'grey50') +
+  geom_point(aes(color = Season), size = 2, alpha = .75)
+ 
+```
+
+#### Marginal (Modeled) Means 
+This shows comparisons of "marginal", "least squares" or "adjusted" means.  These 
+are modeled means, estimated for what would be seen at average levels of all 
+the other predictors. They are a product not only of the data but also of the
+model.  Error bars are 95% confidence intervals.
+
+```{r}
+station_emms <- emmeans(density_lmer_no_low, ~Station, type = 'response')
+plot(station_emms) +
+  coord_flip() +
+  xlab('Predicted Zooplankton Abundance')
+pairs(station_emms)
+```
+
+Station 1 has higher zooplankton diversity than Stations 2 or 4.
+
+### Turbidity
+#### Data
+```{r fig.width = 5, fig.height = 3}
+drop_low %>%
+  ggplot(aes(log(Turb), log1p(Density))) +
+  geom_point(aes(color = Season), size = 2, alpha = .75) +
+  geom_smooth(method = 'lm')
+```
+
+####  Model
+```{r}
+station_emms <- emmeans(density_lmer_no_low, ~Turb, at = list(Turb = 1:15),
+                        type = 'response')
+plot(station_emms) +
+  coord_flip() +
+  xlab("Estimated Zooplankton Density")
+  
+```
+
+### Chlorophyll
+#### Data
+There is not much pattern with chlorophyll in the raw data. I show it here 
+by Station, because it may differ -- but we did not fit interaction terms.
+```{r fig.width = 5, fig.height = 3}
+drop_low %>%
+  ggplot(aes(log(Chl), log1p(Density))) +
+  geom_point(aes(color = Station), size = 2, alpha = .75) +
+  geom_smooth(method = 'lm') +
+  facet_wrap(~Station)
+```
+
+####  Model
+But the relationship emerges in the model, presumably because it is hidden or
+confounded by other predictors in the model.
+```{r}
+station_emms <- emmeans(density_lmer_no_low, ~Chl, at = list(Chl = 1:20),
+                        type = 'response')
+plot(station_emms) +
+  coord_flip() +
+  xlab("Estimated Zooplankton Density")
+  
+```
+
+# Shannon Diversity
+```{r}
+shannon_lmer <- lmer(H ~ Station +  
+                          Temp +
+                          Sal + 
+                          log(Turb) + 
+                          log(Chl) + 
+                          log1p(Fish) +
+                          (1 | Yearf),
+                        data = complete_data, na.action = na.omit)
+anova(shannon_lmer)
+```
+
+So this model returns no statistically significant predictors.
+Lets check on this with `step()`. 
+
+### Stepwise Model Selection
+```{r}
+(shannon_step <- step(shannon_lmer,))
+shannon_step <- get_model(shannon_step)
+```
+So, even after model simplification, we see no statistically significant 
+predictors.
+
+##  Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(shannon_lmer, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(shannon_lmer, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(shannon_lmer, hatvalues(.) ~ fitted(.))
+plot(shannon_lmer, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(shannon_lmer)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+This model is not dreadful, although he one outlier may be problematic.
+
+## Model on Reduced Data
+```{r}
+shannon_lmer_no_low <- lmer(H ~ Station +  
+                          Temp +
+                          Sal + 
+                          log(Turb) + 
+                          log(Chl) + 
+                          log1p(Fish) +
+                          (1 | Yearf),
+                        data = drop_low, na.action = na.omit)
+anova(shannon_lmer_no_low)
+```
+
+Fish abundance is marginally significant here.
+
+
+
+
+### Stepwise Model Selection
+```{r}
+(shannon_step_no_low <- step(shannon_lmer_no_low, reduce.random = TRUE))
+shannon_step_no_low <- get_model(shannon_step_no_low)
+```
+
+Reducing model complexity using stepwise model selection by AIC leads to a 
+model that retains Station as a fairly robust predictor, even though it was NOT identified as important in the full model.  Station is partially colinear with
+Salinity and Chlorophyll, so it is possible that including too many terms in the 
+initial model hid a simpler pattern.
+
+##  Model Diagnostics (full Model)
+```{r fig.width = 3, fig.height = 3}
+plot(shannon_lmer_no_low, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(shannon_lmer_no_low, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(shannon_lmer_no_low, hatvalues(.) ~ fitted(.))
+plot(shannon_lmer_no_low, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(shannon_lmer_no_low)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+
+Model diagnostics are not too bad. While we have some points with slightly
+high leverage compared to other points, the leverage values are only moderate
+at 0.35 and Cook's distance is < 0.5.
+
+##  Model Diagnostics (simple Model)
+```{r fig.width = 3, fig.height = 3}
+plot(shannon_step_no_low)
+
+```
+
+## Graphic Summary
+#### Data (dropping low salinity samples)
+```{r fig.width = 5, fig.height = 3}
+drop_low %>%
+  ggplot(aes(Station, H)) +
+  stat_summary(size = 1, color = 'grey50') +
+  geom_point(aes(color = Season), size = 2, alpha = .75)
+ 
+```
+
+
+
+#### Marginal (Modeled) Means -- Full Model
+This shows comparisons of "marginal", "least squares" or "adjusted" means from
+the full model, where Station was not identified as a significant predictor of
+diversity.
+
+```{r}
+station_emms <- emmeans(shannon_lmer_no_low, ~Station, type = 'response')
+plot(station_emms) +
+  coord_flip() +
+  xlab('Predicted Zooplankton Diversity')
+pairs(station_emms)
+```
+
+Plankton diversity is lowest upstream, although the pattern is weak, and does
+not clearly emerge from the noise in this model.
+
+
+### Marginal (Modeled) Means -- Reduced Model
+```{r}
+station_emms <- emmeans(shannon_step_no_low, ~Station, type = 'response')
+plot(station_emms) +
+  coord_flip() +
+  xlab('Predicted Zooplankton Diversity')
+pairs(station_emms)
+```
+
+The simpler model has narrower error bars, but shows the same pattern as the 
+data or the full model.  Station 1 shows lower zooplankton diversity than the 
+other three sites.
+
+
+# Single Species Models
+## Model Choice
+Our model alternatives are similar to the choices we had for the Total Density 
+model. The problem is, we can't use any of the continuous data distributions in 
+GAMS with zero values (at least relying on the canonical link functions) because
+(log(0) = -Inf; 1/0 = Inf, 1 / 0*0 = Inf). The easiest solution is to add some 
+finite small quantity to the density data, and predict that. Here we predict
+log(Density + 1) using Gaussian models.  It's not ideal, especially for species
+where there are many zeros, but it's a good start.  A two stage model would be a
+bit more robust, but probably no more informative.
+
+## Automating Analysis of Separate Species
+I'm going to automate analysis of all selected species by using a "nested"
+Tibble.  This is a convenient alternative to writing a "for" loop to run
+multiple identical analyses.
+
+I create a "long" data source.
+
+```{r}
+spp_data <- complete_data %>%
+  select(Yearf, Season, Station, Temp,
+          Sal, Turb, Chl, Fish, RH,
+          Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  pivot_longer(-c(Yearf:RH), names_to = 'Species', values_to = 'Density')
+```
+
+Next, I create a function to run the `lmer()` analysis.  The function takes a 
+data frame or tibble as an argument. The tibble must have data columns with the
+correct names. Unfortunately, I can't run `step()` on the full model within
+a nested tibble, as step() is unable to find the data used to construct each
+model used as a starting point for the stepwise model simplification.
+
+```{r}
+my_lmer <- function(.dat) {
+  mod_1 <-  lmer(log1p(Density) ~
+                   Station +
+                   Temp +
+                   Sal + 
+                   log(Turb) + 
+                   log(Chl) + 
+                   log1p(Fish) +
+                   (1 | Yearf),
+  data = .dat, na.action = na.omit)
+  return(mod_1)
+}
+```
+
+Next, I create the nested tibble, and conduct the analysis on each species....
+
+```{r}
+spp_analysis <- spp_data %>%
+  group_by(Species) %>%
+  nest() %>%
+  mutate(lmers = map(data, my_lmer))
+```
+
+and finally, output the model results.  I can do that in a "for" loop, but it's 
+Awkward to look through a long list of output, so I step through each species 
+in turn.
+
+\newpage
+## Acartia
+```{r}
+spp = 'Acartia'
+mod_1 <- spp_analysis$lmers[spp_analysis$Species == spp][[1]]
+anova(mod_1)
+```
+
+```{r}
+summary(mod_1)
+```
+
+Acartia is nmor abundant 
+
+
+### Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(mod_1, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(mod_1, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(mod_1, hatvalues(.) ~ fitted(.))
+plot(mod_1, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(mod_1)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+\newpage
+## Balanus
+```{r}
+spp = 'Balanus'
+mod_1 <- spp_analysis$lmers[spp_analysis$Species == spp][[1]]
+anova(mod_1)
+```
+
+```{r}
+summary(mod_1)
+```
+
+### Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(mod_1, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(mod_1, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(mod_1, hatvalues(.) ~ fitted(.))
+plot(mod_1, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(mod_1)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+\newpage
+##  Eurytemora
+```{r}
+spp = 'Eurytemora'
+mod_1 <- spp_analysis$lmers[spp_analysis$Species == spp][[1]]
+anova(mod_1)
+```
+
+```{r}
+summary(mod_1)
+```
+
+### Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(mod_1, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(mod_1, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(mod_1, hatvalues(.) ~ fitted(.))
+plot(mod_1, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(mod_1)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+\newpage
+## Polychaete
+```{r}
+spp =  "Polychaete" 
+
+mod_1 <- spp_analysis$lmers[spp_analysis$Species == spp][[1]]
+anova(mod_1)
+```
+
+```{r}
+summary(mod_1)
+```
+
+### Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(mod_1, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(mod_1, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(mod_1, hatvalues(.) ~ fitted(.))
+plot(mod_1, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(mod_1)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+\newpage
+## Pseudocal
+```{r}
+spp =  "Pseudocal"
+mod_1 <- spp_analysis$lmers[spp_analysis$Species == spp][[1]]
+anova(mod_1)
+```
+
+```{r}
+summary(mod_1)
+```
+
+### Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(mod_1, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(mod_1, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(mod_1, hatvalues(.) ~ fitted(.))
+plot(mod_1, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(mod_1)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+\newpage
+## Temora
+```{r}
+spp =  "Temora"   
+mod_1 <- spp_analysis$lmers[spp_analysis$Species == spp][[1]]
+anova(mod_1)
+```
+
+```{r}
+summary(mod_1)
+```
+
+### Model Diagnostics
+```{r fig.width = 3, fig.height = 3}
+plot(mod_1, resid(., type = "pearson") ~ fitted(.), abline = 0, 
+     id = 0.05)
+plot(mod_1, sqrt(abs(resid(., type = "pearson"))) ~ fitted(.))
+plot(mod_1, hatvalues(.) ~ fitted(.))
+plot(mod_1, cooks.distance(.) ~ fitted(.))
+as_tibble(resid(mod_1)) %>% ggplot(aes(value)) + geom_histogram(bins = 20)
+```
+
+
