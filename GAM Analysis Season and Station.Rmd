@@ -22,7 +22,7 @@ knitr::opts_chunk$set(fig.align = 'center',
 
 # Introduction
 This notebook includes analyses using GAMs, based on analysis of model 
-colinearity and concurvidity.
+collinearity and concurvidity.
 
 In this Notebook, I emphasize Season and Station as factors to explain patterns
 in the zooplankton data. These terms are fairly highly correlated with
@@ -54,9 +54,9 @@ unexplained variance in the model.
 
 This means these models omit:
 
-* Discharge (highly colinear with other predictors),
+* Discharge (highly collinear with other predictors),
 
-* Oxygen Saturation (Incomplete data; highly colinear with Temperature and thus
+* Oxygen Saturation (Incomplete data; highly collinear with Temperature and thus
   Season and Station).
 
 * Temperature (Highly correlated with Season and somewhat correlated with
