@@ -18,7 +18,7 @@ spatio-temporal environment of Maine estuaries.  We explored many different
 approaches to statistical modeling of these data in companion Github
 repositories (Plankton_Reanalysis; zooplankton_causal_analysis). As is common
 during exploratory analysis, we tested many different models to determine
-srengths and weaknesses of different modeling approaches.
+strengths and weaknesses of different modeling approaches.
 
 This repository includes final analyses and R notebooks used to generate the
 "Supplementary Information" that will accompany the manuscript.  As such, it
