@@ -22,7 +22,7 @@ knitr::opts_chunk$set(fig.align = 'center',
 
 # Introduction
 This notebook provides analyses using GAMs, based on model selection
-informed by closer analysis of model colinearity and concurvidity.
+informed by closer analysis of model collinearity and concurvidity.
 
 In this Notebook, I emphasize physical environmental variables.  The base model includes the following Fixed Effects predictors:
 
@@ -37,8 +37,8 @@ unexplained variance in the model.
 
 This means these models omit:
 
-*  Discharge (highly colinear with other predictors),  
-*  Oxygen Saturation (Incomplete data and Highly colinear with Temperature),  
+*  Discharge (highly collinear with other predictors),  
+*  Oxygen Saturation (Incomplete data and Highly collinear with Temperature),  
 *  Season (Highly correlated with multiple predictors, especially Temperature)
 *  Station (Moderately correlated with Salinity and Temperature)
 *  Sample Event (inclusion as a random factor often led to overspecified models
