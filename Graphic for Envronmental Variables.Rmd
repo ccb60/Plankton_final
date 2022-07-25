@@ -191,7 +191,8 @@ new_values <- base_data %>%
 long_data <- long_data %>%
   mutate(Transformed_Values = new_values,
          fancy_p_2 = factor(Variable, levels = plain_labels, 
-                        labels = fancy_labels_2))
+                        labels = fancy_labels_2)) %>%
+  filter(! is.na(Values))
 ```
 
 # Graphic Development
@@ -273,13 +274,13 @@ we don't really need so much height, so we can make the graphic slightly shorter
 ```{r fig.width = 6.85, fig.height = 4.9}
 ggplot(long_data, aes(Station, Transformed_Values, color = Season)) +
   geom_point(aes(shape = factor(Year)), 
-             alpha = 0.35) +
+             alpha = 0.5) +
   stat_summary(aes(group = Season), geom = 'line', fun = mean) +
-  stat_summary(aes(group = Season), geom = 'point', size = 2, fun = mean) +
+  stat_summary(aes(group = Season), geom = 'point', size = 1, fun = mean) +
   stat_summary(mapping = aes(group = Season), geom = 'errorbar', width = 0.2,
                fun.data = mean_se
                ) +
-
+ 
   facet_wrap(~fancy_p_2, 
              scales = 'free_y', 
              nrow = 3,
@@ -297,7 +298,7 @@ ggplot(long_data, aes(Station, Transformed_Values, color = Season)) +
   theme_classic(base_size = 11) +
   theme(strip.placement = 'outside',
         strip.background = element_blank(),
-        legend.position = c(.85, .175), 
+        legend.position = c(.85, .11), 
         legend.box = 'horizontal',
         legend.title.align = 0.5,)
 ```
