@@ -1,7 +1,7 @@
 ---
-title: "Using GAMs to Analyze Plankton Comunity NMDS Data"
+title: "Using GAMs to Analyze Plankton Community NMDS Data"
 author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
-date: "5/17/2022"
+date: "7/21/2022"
 output:
   pdf_document:
     toc: true
@@ -37,20 +37,19 @@ The flow of analyses is as follows:
    the best linear combination of the NMDS axes for predicting the environmental
    variables, not the other way around, but it is a fairly standard method.
    
-4. Conduct GAM analyses of the NMDS axis scores, based on the FULL data.  This
-   analysis includes both GAM models based on quantitative environmental
+4. Conduct GAM analyses of the NMDS axis scores, based on the **Full Data**.
+   This analysis includes both GAM models based on quantitative environmental
    predictors (mirroring the analysis of abundance and diversity in the 
    "GAM-Analysis-Environmental.pdf" notebook) and the analysis based on Season 
    and Station (as in the "GAM-Analysis-Season-and-Station.pdf" notebook).
    The Season by Station analysis generally perform poorly.
    
-5. Conduct GAM analyses of the NMDS axis scores, based on the reduced data,
+5. Conduct GAM analyses of the NMDS axis scores, based on the **Reduced Data**,
    which omits samples with salinity less than  10 PSU.  This also includes 
    both Environmental and Season by Station analysis, for completeness.
    
 6. Generate NMDS Graphics based on the reduced data set that omits low salinity
    samples.
-
 
 # Load Libraries
 ```{r libraries}
@@ -75,8 +74,6 @@ GitHub repositories more likely to run "out of the box".
 
 ```{r folder_refs}
 data_folder <- "Original_Data"
-
-
 dir.create(file.path(getwd(), 'figures'), showWarnings = FALSE)
 ```
 
@@ -458,11 +455,10 @@ ef <- envfit(NMDSE, envNMDS[,c(1, 3:17)], permu = 9999, na.rm = TRUE)
 ef
 ```
 
-#### A Note on theMissing Values
+#### A Note on the Missing Values
 Note 13 observations deleted due to missingness. Those are the 2013 data, which
 lacks DO saturation data. We can refit to include those data by dropping DO as a
 predictor.  That might alter some fits.
-
 
 ```{r}
 names(envNMDS)
@@ -615,7 +611,6 @@ plt <- ggplot(data = envNMDS, aes(MDS1, MDS2)) +
                               order = 2))
 ```
 
-
 ```{r arrow_plot_1, fig.width = 3.3, fig.height = 4.4}
 plt + 
   theme_classic(base_size = 10) + 
@@ -637,6 +632,7 @@ That is still too busy.
 ```{r}
 ef_2$vectors
 ```
+
 Several variables showed no significant link to the NMDS plot, according to 
 the `envfit()` function output.  We can simplify one notch more by dropping
 non-significant variables.
@@ -694,7 +690,6 @@ ggsave('figures/nmds_env_significant.png', type='cairo',
 ggsave('figures/nmds_env_significant.pdf', device = cairo_pdf, 
        width = 3.3, height = 3.4)
 ```
-
 
 ###  Environmental Variables Used in Models
 
@@ -757,9 +752,7 @@ ggsave('figures/nmds_env_selected.pdf', device = cairo_pdf,
        width = 3.3, height = 3.4)
 ```
 
-
 ## Qualitative Conclusions
-
 *  Axis 1 is highly correlated with season, and thus highly correlated with 
    discharge, temperature and oxygen saturation (which was dropped from this 
    graphic because of missing 2013 data).
@@ -930,6 +923,7 @@ summary(ss_gam_2_1)
 
 Again, the quantitative predictors model provides a significantly better model 
 by AIC.
+
 ```{r}
 AIC(gam_2_1, ss_gam_2_1)
 ```
@@ -1139,7 +1133,6 @@ plot(emms) +
 
 ```
 
-
 ### Axis 2
 ```{r}
 ss_gam_2_1_no_low <- gam(MDS2 ~ 
@@ -1280,7 +1273,6 @@ ggsave('figures/nmds_env_selected_no_low.png', type='cairo',
 ggsave('figures/nmds_env_selected_no_low.pdf', device = cairo_pdf, 
        width = 3.3, height = 3.4)
 ```
-
 
 ```{r}
 ef_3$vectors

@@ -22,7 +22,7 @@ knitr::opts_chunk$set(fig.align = 'center',
 
 # Introduction
 This notebook provides analyses using GAMs, based on model selection
-informed by closer analysis of model collinearity and concurvidity.
+informed by closer analysis of model collinearity and concurvity.
 
 In this Notebook, I emphasize physical environmental variables.  The base model includes the following Fixed Effects predictors:
 
@@ -41,7 +41,7 @@ This means these models omit:
 *  Oxygen Saturation (Incomplete data and Highly collinear with Temperature),  
 *  Season (Highly correlated with multiple predictors, especially Temperature)
 *  Station (Moderately correlated with Salinity and Temperature)
-*  Sample Event (inclusion as a random factor often led to overspecified models
+*  Sample Event (inclusion as a random factor often led to over-specified models
      and it seldom proved important)
 
 # Load Libraries
@@ -55,6 +55,7 @@ library(emmeans)   # For extracting useful "marginal" model summaries
 # Set Graphics Theme
 This sets `ggplot()`graphics for no background, no grid lines, etc. in a clean
 format suitable for (some) publications.
+
 ```{r set_theme}
 theme_set(theme_classic())
 ```
@@ -86,12 +87,9 @@ station_data <- read_excel(file_path,
   rename_with(~ gsub("_Abundance", "", .x)) %>%
   filter(! is.na(date))
 ```
+
 ```{r}
 names(station_data)[10:12]
-```
-
-
-```{r}
 names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
 ```
 
@@ -200,15 +198,18 @@ summary(fish_gam)
 ```
 
 Note that the model only explains on the order of 33% of the variance.
+
 ```{r}
 anova(fish_gam)
 ```
+
 ### Plot GAM Results
 ```{r}
 oldpar <- par(mfrow = c(2,3))
 plot(fish_gam)
 par(oldpar)
 ```
+
 The GAM fit is highly influenced by a low Density sample with very few fish.
 
 ### Concurvidity Analysis
@@ -283,6 +284,7 @@ the importance of not quite linear relationships.
 ```{r}
 anova(fish_gam_no_low)
 ```
+
 ### Plot GAM Results
 ```{r}
 oldpar <- par(mfrow = c(2,3))
@@ -355,7 +357,6 @@ summary(density_gam)
 anova(density_gam)
 ```
 
-
 ### Plot the GAM
 ```{r}
 oldpar <- par(mfrow = c(2,3))
@@ -363,7 +364,7 @@ plot(density_gam)
 par(oldpar)
 ```
 
-The only significnatly non-linear response is the response for salinity,
+The only significantly non-linear response is the response for salinity,
 which appears to be driven by a few very low salinity samples.
 
 ## Model on Reduced Data
@@ -408,6 +409,7 @@ oldpar <- par(mfrow = c(2,3))
 plot(density_gam_reduced)
 par(oldpar)
 ```
+
 Again, results are little affected by removing non-significant terms.  Even this
 simple model predicts on the order of 60% of the variance.
 
@@ -462,6 +464,7 @@ oldpar <- par(mfrow = c(2,3))
 plot(shannon_gam_no_low)
 par(oldpar)
 ```
+
 Plankton diversity is highest at low temperatures and at intermediate levels
 of chlorophyll.  Neither of those patterns was uncovered by the linear model
 analysis.
@@ -523,7 +526,6 @@ my_gam <- function(.dat) {
 }
 ```
 
-
 Next, I create the nested tibble, and conduct the analysis on each species....
 
 ```{r}
@@ -533,7 +535,7 @@ spp_analysis <- spp_data %>%
   mutate(gam_mods = map(data, my_gam))
 ```
 
-and finally, output the model results.  I can do that in a "for" loop, but it's 
+And finally, output the model results.  I can do that in a "for" loop, but it's 
 Awkward to look through a long list of output, so I step through each species in turn.
 
 \newpage
@@ -587,7 +589,6 @@ par(oldpar)
 
 \newpage
 ##  Eurytemora
-
 ```{r}
 spp =  "Eurytemora" 
 mod <- spp_analysis$gam_mods[spp_analysis$Species == spp][[1]]

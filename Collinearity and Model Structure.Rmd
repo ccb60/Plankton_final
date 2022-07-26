@@ -79,7 +79,6 @@ library(lmerTest)  # Automatically loads lme4
 library(tidyverse)
 library(readxl)
 library(car)       # for vif() function
-#library(fmsb)
 library(emmeans)   # For extracting useful "marginal" model summaries
 ```
 

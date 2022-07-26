@@ -21,17 +21,17 @@ knitr::opts_chunk$set(fig.align = 'center',
 ```
 
 # Introduction
-This notebook includes analyses using GAMs, based on analysis of model 
-collinearity and concurvidity.
+This notebook includes analyses using GAMs, with model terms selected based in 
+large part based on analysis of model collinearity and concurvity.
 
 In this Notebook, I emphasize Season and Station as factors to explain patterns
 in the zooplankton data. These terms are fairly highly correlated with
 Temperature and Salinity, so including terms for Season and Station more or less
-preculdes including Salinity and Temperature in a GAM model.
+precludes including Salinity and Temperature in a GAM model.
 
-Where I have compaared models, the Season and Station models generally don't 
+Where I have compared models, the Season and Station models generally don't 
 perform as well as the models based on quantitative environmental predictors
-(based on AIC), but I have not compared all paire of such models.
+(based on AIC), but I have not compared all pairs of such models.
 
 The base model here includes the following Fixed Effects predictors:
 
@@ -114,11 +114,9 @@ station_data <- read_excel(file_path,
 names(station_data)[10:12]
 ```
 
-
 ```{r}
 names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
 ```
-
 
 Station names are arbitrary, and Erin previously expressed interest in renaming 
 them from Stations 2, 4, 5 and 8 to Stations 1,2,3,and 4.
@@ -177,11 +175,11 @@ rm(station_data)
 
 ## Complete Cases
 This drops only two samples, one for missing Zooplankton data, one for missing
-fish data. We need this reduced data set to run The `step()` function. It
-makes little sense to try stepwise model selection if each time you add or 
-remove a variable, the sample you are studying changes. Since fish is never an
-important predictor, we will want need to refit models after stepwise elimination
-to use the most complete possible data set.
+fish data. We need this reduced data set to run The `step()` function. It makes
+little sense to try stepwise model selection if each time you add or remove a
+variable, the sample you are studying changes. Since fish is never an important
+predictor, we will want need to refit models after stepwise elimination to use
+the most complete possible data set.
 
 ```{r}
 complete_data <- base_data %>%
@@ -302,7 +300,7 @@ summary(fish_gam_ss_no_low)
 
 This model explains 42% of the variance, quite a bit better than the equivalent model based only on the quantitative environmental predictors.  Fish abundance
 (in our true "marine" sample) does appear to be affected by time of year
-and possibly by zooplanktn density.
+and possibly by zooplankton density.
 
 ```{r}
 anova(fish_gam_ss_no_low)
@@ -316,7 +314,7 @@ par(oldpar)
 
 ### Plot Season and Station
 While Seasons differ by ANOVA, no pairwise comparisons are significant. Noise
-in this relatinship if fairly high, obscuring patterns.
+in this relationship if fairly high, obscuring patterns.
 
 ```{r fig.width = 3, fig.height = 2.5}
 emms <- emmeans(fish_gam_ss_no_low, ~Season, type = 'response')
@@ -367,7 +365,7 @@ density_gam<- gam(log(Density) ~
 summary(density_gam)
 ```
 
-This model explains a far lower proportion of hte variance than the model based
+This model explains a far lower proportion of the variance than the model based
 solely on quantitative predictors.
 
 ```{r}
@@ -470,7 +468,7 @@ summary(shannon_gam_ss)
 ```
 
 Again, the variance explained is quite small compared to the models based on 
-qunatitative predictors.
+quantitative predictors.
 
 ```{r}
 anova(shannon_gam_ss)
@@ -591,7 +589,7 @@ names.
 
 The initial model fits for some species had a lot of wiggles in them, to an 
 extent that I thought did not make much scientific sense, so I decided to reduce
-the dimensionality of the GAM smoothers, by adding the parameter `k= 4`. Lowe
+the dimensional of the GAM smoothers, by adding the parameter `k= 4`. Lowe
 numbers constrain the GAM to fit smoother lines.
 
 ```{r}
