@@ -108,7 +108,8 @@ base_data <- station_data %>%
                DOY, riv_km, Temp, Sal, Turb, AvgTurb, 
          DOsat, Chl, Fish, 
          Zoopl, Diversity, SEI,
-         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora
+         ) %>%
   arrange(Date, Station)
 head(base_data)
 ```
@@ -170,7 +171,7 @@ fancy_labels_2 =  c(expression("Temperature (" * degree * "C)"),
                     expression("Log(Chlorophyll) (" * mu * g * L ^-1 ~")"),
                     expression("Oxygen Saturation" ~ "(%)"),
                     expression("Log(1 + Fish)" ~  "(CPUE)"),
-                    expression("Zooplankton (" * m ^-3 ~ ")" ),
+                    expression("Log(1 + Zoopl.) (" * m ^-3 ~ ")" ),
                     expression("Diversity" ~ "(H)"))
 
 long_data <- long_data %>%
@@ -185,7 +186,8 @@ new_values <- base_data %>%
   
   mutate(Turb = log(Turb),
          Chl = log(Chl),
-         Fish = log1p(Fish)) %>%
+         Fish = log1p(Fish),
+         Zoopl = log1p(Zoopl)) %>%
   pivot_longer(-c(Date:riv_km), 
                names_to = 'Variable', values_to = 'Values_2') %>%
   pull('Values_2')
@@ -222,7 +224,7 @@ ggplot(base_data, aes(as.numeric(Station), Temp, color = Season)) +
          shape = guide_legend(title.position = "top"))
 ```
 
-## Using `facet_wrap()` to Show All  Variables
+## Using `facet_wrap()` to Show All Variables
 Earlier versions of this graphic were based on bootstrapped 95% confidence 
 intervals, but confidence interval functions (`mean_cl_boot`, `mean_cl_normal`, 
 `mean_sdl`) gave me an error
