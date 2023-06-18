@@ -1,0 +1,185 @@
+---
+title: "Graphic for Showing Estuary Conditions in Space And Time"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "6/21/2022"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+A central challenge of making sense of ecological processes complex estuary 
+environments is that conditions in the estuary vary in complex ways in time and 
+space.  Mixing of fresh and salt water creates steep three dimensional ecotones
+of salinity, temperature, and water density. Those ecotones drive local
+hydrodynamics that can concentrate nutrients or particulates in certain times or
+places, while diluting them or washing them out of the estuary elsewhere. The 
+ecotones themselves shape the spatio-temporal structure of both "predictors" and
+"responses".
+
+In this notebook, I look at ideas for graphically depicting the spatio-temporal 
+structure of all measured variable.  Other notebooks examine the use of
+sequential models and path models for understanding estuary structure. Here, I 
+focus on graphic exposition only, using R and `ggplot2` as the graphics engine.
+
+This notebook is a variation of the "Graphics for Environmental Variables" 
+notebook that explores whether the Zooplankton variable should be log
+transformed.  We used a log-transformed value in all of the data analyses
+because it made sense from a modeling perspective.
+
+# Load Libraries
+```{r libraries, message = FALSE, warning = FALSE}
+library(tidyverse)
+library(readxl)
+library(mgcv)      # for GAM models
+library(emmeans)   # For extracting useful "marginal" model summaries
+
+theme_set(theme_classic())
+```
+
+# Load Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+
+dir.create(file.path(getwd(), 'figures'), showWarnings = FALSE)
+```
+
+## Load Data From Source
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+```
+
+## Subsetting to Desired Data
+I base selection of predictor variables here on the ones used for the 
+environmental loading in the community analysis.
+
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+   mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         Station =factor(Station),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         Fish = `___61`,
+         Zoopl = combined_density,
+         Diversity = H
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, 
+               DOY, riv_km, Temp, Sal, Turb, AvgTurb, 
+         DOsat, Chl, Fish, 
+         Zoopl, Diversity, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+head(base_data)
+```
+
+```{r}
+rm(station_data)
+```
+
+## Base Graphic Design -- Untransformed Zooplankton
+We represent location only as "Station", not River Kilometer.  This has the
+advantage of placing upstream to the left.
+
+```{r fig.width = 5, fig.height = 3}
+ggplot(base_data, aes(as.numeric(Station), Zoopl, color = Season)) +
+  stat_summary(geom = 'line', lwd = 1) +
+  stat_summary(geom = 'errorbar', width = 0.15, lwd = 1) +
+  geom_point(aes(shape = factor(Year)), alpha = 0.5) +
+
+  xlab('Station') +
+  ylab(expression("Zooplankton (" * m ^-3 ~ ")" )) +
+  
+  scale_shape(name = 'Year') +
+  
+  # All the following is unnecessary here, since  these are mostly defaults, but
+  # I Include them as reminders of how to control the legend.
+  theme(legend.position = 'right', 
+        legend.box = 'vertical',
+        legend.title.align = 0) +
+  guides(color = guide_legend(title.position = "top"),
+         shape = guide_legend(title.position = "top"))
+```
+```{r}
+ggsave('figures/Zooplankton_untransformed.png',
+         width = 5, height = 3)
+ggsave('figures/Zooplankton_untransformed.pdf', device = cairo_pdf, 
+       width = 5, height = 3)
+```
+
+## Base Graphic Design -- Transformed Zooplankton
+We represent location only as "Station", not River Kilometer.  This has the
+advantage of placing upstream to the left.
+
+```{r fig.width = 5, fig.height = 3}
+ggplot(base_data, aes(as.numeric(Station), log1p(Zoopl), color = Season)) +
+  stat_summary(geom = 'line', lwd = 1) +
+  stat_summary(geom = 'errorbar', width = 0.15, lwd = 1) +
+  geom_point(aes(shape = factor(Year)), alpha = 0.5) +
+
+  xlab('Station') +
+  ylab(expression("Log(1 + Zooplankton) (" * m ^-3 ~ ")" )) +
+  
+  scale_shape(name = 'Year') +
+  
+  # All the following is unnecessary here, since  these are mostly defaults, but
+  # I Include them as reminders of how to control the legend.
+  theme(legend.position = 'right', 
+        legend.box = 'vertical',
+        legend.title.align = 0) +
+  guides(color = guide_legend(title.position = "top"),
+         shape = guide_legend(title.position = "top"))
+```
+
+```{r}
+ggsave('figures/Zooplankton_transformed.png',
+         width = 5, height = 3)
+ggsave('figures/Zooplankton_transformed.pdf', device = cairo_pdf, 
+       width = 5, height = 3)
+```
+
