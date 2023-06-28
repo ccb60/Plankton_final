@@ -1,0 +1,305 @@
+---
+title: "Reanalysis of GAMS with Significant Chlorophyll Predictors"
+author: "Curtis C. Bohlen, Casco Bay Estuary Partnership"
+date: "6/27/2023"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    fig_width: 5
+    fig_height: 4
+---
+
+<img
+    src="https://www.cascobayestuary.org/wp-content/uploads/2014/04/logo_sm.jpg"
+    style="position:absolute;top:100px;right:50px;" />
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(fig.align = 'center',
+                      fig.width = 5, fig.height = 4,
+                      collapse = TRUE, comment = "#>")
+```
+
+# Introduction
+This notebook provides analyses using GAMs, of a couple of models that included
+a single, high chlorophyll value. The intent is to run reach analysis omitting
+that high Chlorophyll point and confirm that the interpretation of the data does
+not change (much).
+
+# Load Libraries
+```{r libraries}
+library(tidyverse)
+library(readxl)
+library(mgcv)      # for GAM models
+library(emmeans)   # For extracting useful "marginal" model summaries
+
+theme_set(theme_classic())
+```
+
+# Input Data
+## Folder References
+```{r folder_refs}
+data_folder <- "Original_Data"
+```
+
+## Load Data
+Data preparation follows the same steps as before. I simplify discussion a bit 
+just to save typing / save space.
+```{r load_enviro_data}
+filename.in <- "penob.station.data EA 3.12.20.xlsx"
+file_path <- file.path(data_folder, filename.in)
+station_data <- read_excel(file_path, 
+                           sheet="Final", col_types = c("skip", "date", 
+                                              "numeric", "text", "numeric", 
+                                              "text", "skip", "skip", 
+                                              "skip", 
+                                              rep("numeric", 10),
+                                              "text", 
+                                              rep("numeric", 47),
+                                              "text",
+                                              rep("numeric", 12))) %>%
+  rename_with(~ gsub(" ", "_", .x)) %>%
+  rename_with(~ gsub("\\.", "_", .x)) %>%
+  rename_with(~ gsub("\\?", "", .x)) %>%
+  rename_with(~ gsub("%", "pct", .x)) %>%
+  rename_with(~ gsub("_Abundance", "", .x)) %>%
+  filter(! is.na(date))
+
+names(station_data)[10:12]
+names(station_data)[10:12] <- c('disch_wk', 'disch_day', 'disch_max')
+
+station_data <- station_data %>%
+  mutate(station = factor(as.numeric(factor(station))))
+head(station_data)
+```
+
+### Subsetting to Desired Data Columns
+```{r build_env_data}
+base_data <- station_data %>%
+  rename(Date = date, 
+         Station = station,
+         Year = year) %>%
+  select(-c(month, month_num)) %>%
+  mutate(Month = factor(as.numeric(format(Date, format = '%m')),
+                                                levels = 1:12, 
+                                                labels = month.abb),
+         DOY = as.numeric(format(Date,format = '%j')),
+         season = factor(season, levels = c('Spring', 'Summer', 'Fall')),
+         is_sp_up = season == 'Spring' & Station == 1,
+         Yearf = factor(Year)) %>%
+  rename(Season = season,
+         Density = combined_density,
+         Temp = ave_temp_c,
+         Sal = ave_sal_psu,
+         Turb = sur_turb,
+         AvgTurb = ave_turb_ntu,
+         DOsat = ave_DO_Saturation,
+         Chl = ave_chl_microgperl,
+         Fish = `___61`,
+         RH = Herring
+         ) %>%
+  select(Date, Station, Year, Yearf, Month, Season, is_sp_up, DOY, riv_km, 
+         disch_wk, disch_day, disch_max,
+         Temp, Sal, Turb, AvgTurb, DOsat, Chl, 
+         Fish, RH, 
+         Density, H, SEI,
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  arrange(Date, Station)
+
+rm(station_data)
+```
+
+## Complete Cases
+This drops two samples, one for missing Zooplankton data, one for missing
+fish data.  We needed a "reduced"complete cases" data set to run The `step()`
+function in earlier analysis steps. It makes little sense to try stepwise model
+selection if each time you add or remove a variable, the sample you are studying
+changes.
+
+```{r}
+complete_data <- base_data %>%
+  select(Season, Station, Yearf,
+         is_sp_up, Temp, Sal, Turb, Chl, Fish, RH,
+         Density, H, 
+         Acartia, Balanus, Eurytemora, Polychaete, Pseudocal, Temora) %>%
+  filter(complete.cases(.))
+```
+
+## Reduced Data
+The low salinity spring samples are doing something rather different, and they
+complicate model fitting. Models are  better behaved if we exclude a few
+extreme samples.
+```{r}
+drop_low <- complete_data %>%
+  filter(Sal > 10)    # Pulls three samples, including one fall upstream sample
+                      # a fourth low salinity sample lacks zooplankton data
+```
+
+And finally, we generate a data set that omits the high Chlorophyll sample. We
+will compare (informally) the results of running the same models on these last
+two data sets.
+
+Here's the high Chlorophyll sample (just to see when and where it occurred).
+```{r}
+drop_low %>%
+  filter(Chl >= 15)
+```
+
+```{r}
+drop_chl <- drop_low %>%
+  filter(Chl <15)
+```
+
+# Shannon Diversity
+## With High Chlorophyll Sample
+```{r}
+shannon_gam_no_low <- gam(H ~ 
+                     s(Temp, bs="ts", k = 5) +
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(Yearf, bs = 're'),
+                   data = drop_low, family = 'gaussian')
+summary(shannon_gam_no_low)
+```
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam_no_low)
+par(oldpar)
+```
+
+## Without High Chlorophyll Sample
+```{r}
+shannon_gam_no_low_2 <- gam(H ~ 
+                     s(Temp, bs="ts", k = 5) +
+                     s(log(Chl), bs="ts", k = 5) + 
+                     s(Yearf, bs = 're'),
+                   data = drop_chl, family = 'gaussian')
+summary(shannon_gam_no_low_2)
+```
+
+We are left with an effectively linear relationship between chlorophyll and
+diversity. As we suspected by looking at the previous graphics, all the 
+curvature comes about by trying to fit that one high chlorophyll sample.
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(shannon_gam_no_low_2)
+par(oldpar)
+```
+
+## Related Graphic
+Here's a graphic that you can compare to the graphics I prepared earlier in the
+week.
+```{r}
+r = range(drop_chl$Chl)
+stops = log(seq(r[1], r[2], length.out = 25))
+chl_emms <- emmeans(shannon_gam_no_low_2, "log(Chl)", 
+                    at = list('log(Chl)' = stops),
+                    type = 'response')
+
+chl_emms_2 <- as_tibble(chl_emms) %>%
+  mutate(Chl = exp(`log(Chl)`)) %>%
+  relocate(Chl)
+```
+
+```{r fig.width = 3, fig.height = 2}
+ggplot(chl_emms_2, aes(Chl, emmean)) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.20) +
+  geom_line() +
+  #geom_point() +
+  geom_point(data = drop_chl, mapping = aes(x = Chl, y = H), 
+             size = 1, color = "gray40") +
+  geom_rug(data = drop_chl, mapping = aes(x = Chl, y = NULL)) +
+  xlab(expression("Chlorophyll (" * mu * g * L ^-1 ~")")) +
+  ylab("Diversity (H)")
+
+```
+
+
+# Balanus
+We are only interested in Balanus, so rather than repeat the automated species
+by species analysis I used before, I've just run the analysis on Balanus
+directly. 
+
+## With High Chlorophyll Sample
+```{r}
+spp_data <- drop_low %>%
+  select(Yearf, Season, Station, Temp,
+          Sal, Turb, Chl, Fish, Balanus)
+```
+
+```{r}
+balanus_gam <- gam(log1p(Balanus) ~ 
+        s(Temp, bs="ts", k = 5) +
+        s(Sal, bs="ts", k = 5) + 
+        s(log(Turb), bs="ts", k = 5) + 
+        s(log(Chl), bs="ts", k = 5) + 
+        s(log1p(Fish),bs="ts", k = 5) +
+        s(Yearf, bs = 're'),
+      data = spp_data, family = "gaussian")
+summary(balanus_gam)
+```
+
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(balanus_gam)
+par(oldpar)
+```
+
+## Without High Chlorophyll Sample
+```{r}
+spp_data_2 <- drop_chl %>%
+  select(Yearf, Season, Station, Temp,
+          Sal, Turb, Chl, Fish, Balanus)
+```
+
+```{r}
+balanus_gam_2 <- gam(log1p(Balanus) ~ 
+        s(Temp, bs="ts", k = 5) +
+        s(Sal, bs="ts", k = 5) + 
+        s(log(Turb), bs="ts", k = 5) + 
+        s(log(Chl), bs="ts", k = 5) + 
+        s(log1p(Fish),bs="ts", k = 5) +
+        s(Yearf, bs = 're'),
+      data = spp_data_2, family = "gaussian")
+summary(balanus_gam_2)
+```
+
+```{r}
+oldpar <- par(mfrow = c(2,3))
+plot(balanus_gam_2)
+par(oldpar)
+```
+
+## Related Graphic
+```{r}
+r = range(drop_chl$Chl)
+stops = log(seq(r[1], r[2], length.out = 25))
+chl_emms <- emmeans(balanus_gam_2, "log(Chl)", 
+                    at = list('log(Chl)' = stops),
+                    type = 'response')
+
+chl_emms_2 <- as_tibble(chl_emms) %>%
+  mutate(Chl = exp(`log(Chl)`)) %>%
+  relocate(Chl)
+#chl_emms_2
+```
+
+```{r fig.width = 3, fig.height = 2}
+ggplot(chl_emms_2, aes(Chl, response)) +
+  geom_ribbon(aes(ymin = lower.CL, ymax = upper.CL), alpha = 0.20) +
+  geom_line() +
+  geom_point(data = drop_chl, mapping = aes(x = Chl, y = Balanus), 
+             size = 1, color = "gray40") +
+  geom_rug(data = drop_chl, mapping = aes(x = Chl, y = NULL)) +
+  xlab(expression("Chlorophyll (" * mu * g * L ^-1 ~")")) +
+  ylab(expression("Balanus Density (" * m ^-3 ~ ")" )) 
+
+```
+
+I'm actually surprised by that.  The primary effect of the high Chloride number 
+is to slightly increase the slope of the regression line and greatly expand 
+the width of the error band.  In other words, no real change in qualitative
+behavior.
+
